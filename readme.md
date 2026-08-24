@@ -41,6 +41,8 @@ kick > mute > delete > warn > silent
 
 插件不使用内容分、行为分或风险等级。红线命中不会被正常行为抵消，刷屏也不依赖内容评分。
 
+用户提醒与管理员审计相互隔离。群内提醒只显示“消息内容违反群规”“发送频率异常”等公开原因，不显示具体关键词、规则 ID、检测窗口、消息数量或相似度阈值；完整的 `pattern` 和 `evidence` 只保存在管理员审计中。
+
 ## 配置
 
 ### 基础设置
@@ -60,7 +62,7 @@ kick > mute > delete > warn > silent
 | `enabled` | `true` | 启用群治理 |
 | `governancePreset` | `balanced` | 治理强度：`relaxed`、`balanced`、`strict`、`custom` |
 | `warningEnabled` | `true` | 执行治理动作时发送群内提醒 |
-| `warningMessage` | 内置模板 | 支持 `{at}`、`{pattern}`、`{action}`、`{muteMinutes}` |
+| `warningMessage` | 内置模板 | 支持 `{at}`、`{reason}`、`{action}`、`{muteMinutes}` |
 | `muteDurationMinutes` | `10` | 禁言时长 |
 | `extendedMuteDurationMinutes` | `60` | 加重禁言时长 |
 | `burstDetectionEnabled` | `true` | 启用瞬时刷屏检测 |

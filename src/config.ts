@@ -36,8 +36,8 @@ const moderationSchema = {
     .default(true)
     .description('执行治理动作时发送群内提醒'),
   warningMessage: Schema.string()
-    .default('{at} 检测到【{pattern}】，执行动作：{action}。')
-    .description('治理提醒模板，支持 {at}、{pattern}、{action}、{muteMinutes}'),
+    .default('{at} 因【{reason}】，已执行：{action}。')
+    .description('治理提醒模板，支持 {at}、{reason}、{action}、{muteMinutes}'),
   muteAfterOffenses: Schema.number()
     .default(3)
     .min(2)

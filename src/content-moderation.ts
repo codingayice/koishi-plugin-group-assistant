@@ -43,6 +43,7 @@ export interface ModerationAudit {
   signalCode: string
   source: string
   pattern: string
+  evidence: string
   action: ModerationAction
   status: string
   offenseCount: number
@@ -87,6 +88,7 @@ interface MessageViews {
 interface ModerationSignal {
   code: SignalCode
   source: SignalSource
+  publicReason: string
   evidence: string
   pattern: string
   action: ModerationAction
@@ -259,7 +261,7 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
     muteDurationMinutes,
     extendedMuteDurationMinutes: Math.max(muteDurationMinutes + 1, requestedExtendedDuration),
     warningEnabled: config.warningEnabled !== false,
-    warningMessage: config.warningMessage || '{at} 检测到【{pattern}】，执行动作：{action}。',
+    warningMessage: config.warningMessage || '{at} 因【{reason}】，已执行：{action}。',
   }
 }
 
@@ -314,7 +316,13 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
       const signals: ModerationSignal[] = []
 
       if (await isUserInAccessList(ctx, guildId, userId, 'blacklist')) {
-        signals.push(createSignal('blacklist_user', 'access', '黑名单用户发言', 'delete'))
+        signals.push(createSignal(
+          'blacklist_user',
+          'access',
+          '账号受到群治理限制',
+          '黑名单用户发言',
+          'delete',
+        ))
       }
 
       signals.push(...detectBehaviorSignals(session, views, activity, policy))
@@ -368,6 +376,7 @@ function extendTables(ctx: Context) {
     signalCode: 'string',
     source: 'string',
     pattern: 'string',
+    evidence: 'text',
     action: 'string',
     status: 'string',
     offenseCount: 'integer',
@@ -536,7 +545,7 @@ function registerAuditCommand(ctx: Context, config: FlatConfig) {
 
       return latest.map((record) => {
         const ai = record.reviewedByAi ? `，AI：${record.aiReason || record.status}` : ''
-        return `#${record.id} 用户 ${record.userId} 命中【${record.pattern}】[${record.signalCode}] -> ${record.action}，状态 ${record.status}，同类累计 ${record.offenseCount} 次${ai}`
+        return `#${record.id} 用户 ${record.userId} 命中【${record.pattern}】[${record.signalCode}]，证据：${record.evidence} -> ${record.action}，状态 ${record.status}，同类累计 ${record.offenseCount} 次${ai}`
       }).join('\n')
     })
 }
@@ -656,7 +665,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
       if (!isPrivileged(session, config)) return '你没有权限手动警告用户。'
       if (!userId) return '请提供要警告的用户 ID。'
 
-      const signal = createSignal('manual_action', 'manual', reason, 'warn')
+      const signal = createSignal('manual_action', 'manual', reason, reason, 'warn')
       const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
       const decision: ModerationDecision = { signal, action: 'warn', muteMinutes: 0 }
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
@@ -673,7 +682,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
 
       const action = normalizeAction(options.action, 'warn')
       if (action === 'silent') return '手动处罚不支持 silent 动作。'
-      const signal = createSignal('manual_action', 'manual', reason, action)
+      const signal = createSignal('manual_action', 'manual', reason, reason, action)
       const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
       const decision = createDecision(signal, offense.offenseCount, policy)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
@@ -736,6 +745,7 @@ function ruleToSignal(rule: ModerationRule): ModerationSignal {
   return {
     code,
     source: 'content',
+    publicReason: sensitive ? '消息内容待复核' : '消息内容违反群规',
     evidence: `命中${formatScope(rule.scope)}关键词 #${rule.id}`,
     pattern: rule.pattern,
     action: sensitive ? 'silent' : 'delete',
@@ -764,6 +774,7 @@ function detectBehaviorSignals(
       signals.push(createSignal(
         'spam_burst',
         'behavior',
+        '发送频率异常',
         `${seconds} 秒内连续发送至少 ${policy.burstMessageCount} 条消息`,
         'delete',
       ))
@@ -773,7 +784,15 @@ function detectBehaviorSignals(
   }
 
   if (updateSimilarRepeatActivity(views.similarityText, now, item, policy)) {
-    signals.push(createSignal('similar_repeat', 'behavior', '长窗口内多次发送高度相似内容', 'delete'))
+    const minutes = Math.round(policy.similarWindowMs / 60_000)
+    signals.push(createSignal(
+      'similar_repeat',
+      'behavior',
+      '重复发送相似内容',
+      `${minutes} 分钟内达到 ${policy.similarMessageCount} 条相似消息，相似度阈值 ${policy.similarityThreshold}`,
+      'delete',
+      '相似复读',
+    ))
   }
 
   activity.delete(key)
@@ -921,6 +940,7 @@ async function createAudit(
     signalCode: decision.signal.code,
     source: decision.signal.source,
     pattern: decision.signal.pattern,
+    evidence: decision.signal.evidence,
     action: decision.action,
     status,
     offenseCount,
@@ -986,6 +1006,7 @@ async function processAiReviewJob(
       const primary = job.signals[0]
       const confirmedSignal: ModerationSignal = {
         ...primary,
+        publicReason: '消息内容经复核违反群规',
         evidence: `AI 确认违规：${result.category}`,
         pattern: job.signals.map((signal) => signal.pattern).join('、').slice(0, 500),
         action: 'delete',
@@ -1112,7 +1133,7 @@ async function executeAction(session: Session, decision: ModerationDecision, pol
 
 async function executeManualAction(session: Session, userId: string, decision: ModerationDecision) {
   if (decision.action === 'warn') {
-    await session.send(`${h('at', { id: userId })} 管理员警告：${decision.signal.pattern}`)
+    await session.send(`${h('at', { id: userId })} 管理员警告：${decision.signal.publicReason}`)
     return ''
   }
   if (decision.action === 'mute') return muteMember(session, userId, decision.muteMinutes)
@@ -1124,7 +1145,7 @@ async function sendWarning(session: Session, decision: ModerationDecision, polic
   if (!policy.warningEnabled) return
   const replacements: Record<string, string> = {
     '{at}': String(h('at', { id: session.userId })),
-    '{pattern}': decision.signal.pattern,
+    '{reason}': decision.signal.publicReason,
     '{action}': formatAction(decision.action),
     '{muteMinutes}': String(decision.muteMinutes || 0),
   }
@@ -1322,13 +1343,16 @@ function normalizeAction(value: unknown, fallback: ModerationAction): Moderation
 function createSignal(
   code: SignalCode,
   source: SignalSource,
-  pattern: string,
+  publicReason: string,
+  evidence: string,
   action: ModerationAction,
+  pattern = evidence,
 ): ModerationSignal {
   return {
     code,
     source,
-    evidence: pattern,
+    publicReason,
+    evidence,
     pattern,
     action,
     needsAi: false,
