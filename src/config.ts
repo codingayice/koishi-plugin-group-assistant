@@ -61,9 +61,6 @@ const moderationSchema = {
   ])
     .default('balanced')
     .description('治理强度：宽松、均衡、严格或自定义'),
-  warningEnabled: Schema.boolean()
-    .default(true)
-    .description('执行累计处罚时发送群内提醒'),
   punishmentLevels: Schema.array(Schema.object({
     offenseCount: Schema.number()
       .required()
@@ -81,8 +78,8 @@ const moderationSchema = {
       .max(10080)
       .description('禁言时长，仅禁言动作生效'),
     messageTemplate: Schema.string()
-      .required()
-      .description('提醒模板，支持 {at}、{reason}、{action}、{muteMinutes}、{offenseCount}、{level}'),
+      .default('')
+      .description('提醒模板，留空则不通知；支持 {at}、{reason}、{action}、{muteMinutes}、{offenseCount}、{level}'),
   }))
     .default(DEFAULT_PUNISHMENT_LEVELS)
     .max(10)
@@ -160,7 +157,6 @@ export interface Config {
   moderation: {
     enabled?: boolean
     governancePreset?: 'relaxed' | 'balanced' | 'strict' | 'custom'
-    warningEnabled?: boolean
     punishmentLevels?: PunishmentLevelConfig[]
     offenseWindowHours?: number
     burstDetectionEnabled?: boolean

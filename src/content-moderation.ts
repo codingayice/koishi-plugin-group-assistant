@@ -170,7 +170,6 @@ interface ResolvedPolicy {
   similarMinLength: number
   offenseWindowMs: number
   punishmentLevels: ResolvedPunishmentLevel[]
-  warningEnabled: boolean
 }
 
 interface ResolvedPunishmentLevel {
@@ -201,7 +200,6 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
   | 'burstDetectionEnabled'
   | 'similarDetectionEnabled'
   | 'punishmentLevels'
-  | 'warningEnabled'
 >> = {
   relaxed: {
     burstWindowMs: 15_000,
@@ -252,7 +250,6 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
     burstDetectionEnabled: config.burstDetectionEnabled !== false,
     similarDetectionEnabled: config.similarDetectionEnabled !== false,
     punishmentLevels: resolvePunishmentLevels(config.punishmentLevels),
-    warningEnabled: config.warningEnabled !== false,
   }
 }
 
@@ -264,7 +261,7 @@ function resolvePunishmentLevels(levels: PunishmentLevelConfig[] | undefined): R
       offenseCount: clampInteger(item.offenseCount ?? index + 1, 1, 100),
       action: normalizePunishmentAction(item.action),
       muteDurationMinutes: clampInteger(item.muteDurationMinutes ?? 10, 1, 10_080),
-      messageTemplate: item.messageTemplate || defaultPunishmentTemplate(item.action),
+      messageTemplate: item.messageTemplate ?? '',
     }))
     .sort((left, right) => left.offenseCount - right.offenseCount || left.level - right.level)
     .map((item, index) => ({ ...item, level: index + 1 }))
@@ -272,16 +269,6 @@ function resolvePunishmentLevels(levels: PunishmentLevelConfig[] | undefined): R
 
 function normalizePunishmentAction(value: unknown): PunishmentAction {
   return value === 'mute' || value === 'kick' ? value : 'warn'
-}
-
-function defaultPunishmentTemplate(action: unknown) {
-  if (action === 'mute') {
-    return '{at} 因【{reason}】已被禁言 {muteMinutes} 分钟，当前同类违规 {offenseCount} 次。'
-  }
-  if (action === 'kick') {
-    return '{at} 因多次【{reason}】已被移出群聊，当前同类违规 {offenseCount} 次。'
-  }
-  return '{at} 因【{reason}】受到警告，当前同类违规 {offenseCount} 次。'
 }
 
 function clampInteger(value: number, minimum: number, maximum: number) {
@@ -363,7 +350,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
       const offense = await recordOffense(ctx, session.guildId, userId, selected, policy)
       const decision = createDecision(selected, offense.offenseCount, policy)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '')
-      await executeAction(session, decision, policy)
+      await executeAction(session, decision)
 
       if (getActionRank(decision.action) <= getActionRank('warn')) return next()
       return
@@ -711,7 +698,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
       const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
       const decision = createDecision(signal, offense.offenseCount, policy)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
-      const result = await executeManualAction(session, userId, decision, policy)
+      const result = await executeManualAction(session, userId, decision)
       return `已记录用户 ${userId} 的处罚：${decision.action}，同类累计 ${offense.offenseCount} 次。${result ? `\n${result}` : ''}`
     })
 }
@@ -1062,7 +1049,7 @@ async function processAiReviewJob(
         reviewedByAi: true,
         aiReason: result.reason || result.category,
       })
-      await executeAction(job.session, decision, policy)
+      await executeAction(job.session, decision)
       return
     } catch (err) {
       lastError = err
@@ -1153,9 +1140,9 @@ async function updateAiAudit(
   })
 }
 
-async function executeAction(session: Session, decision: ModerationDecision, policy: ResolvedPolicy) {
+async function executeAction(session: Session, decision: ModerationDecision) {
   if (decision.action === 'silent') return
-  await sendPunishmentNotice(session, session.userId || '', decision, policy)
+  await sendPunishmentNotice(session, session.userId || '', decision)
   if (decision.action === 'warn') return
 
   await deleteMessage(session)
@@ -1170,9 +1157,8 @@ async function executeManualAction(
   session: Session,
   userId: string,
   decision: ModerationDecision,
-  policy: ResolvedPolicy,
 ) {
-  await sendPunishmentNotice(session, userId, decision, policy)
+  await sendPunishmentNotice(session, userId, decision)
   if (decision.action === 'warn') {
     if (!decision.punishmentLevel) {
       await session.send(`${h('at', { id: userId })} 管理员警告：${decision.signal.publicReason}`)
@@ -1188,10 +1174,9 @@ async function sendPunishmentNotice(
   session: Session,
   userId: string,
   decision: ModerationDecision,
-  policy: ResolvedPolicy,
 ) {
   const level = decision.punishmentLevel
-  if (!policy.warningEnabled || !level) return
+  if (!level?.messageTemplate.trim()) return
   const replacements: Record<string, string> = {
     '{at}': String(h('at', { id: userId })),
     '{reason}': decision.signal.publicReason,

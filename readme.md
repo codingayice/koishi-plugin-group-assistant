@@ -62,7 +62,6 @@ kick > mute > delete > warn > silent
 | --- | --- | --- |
 | `enabled` | `true` | 启用群治理 |
 | `governancePreset` | `balanced` | 治理强度：`relaxed`、`balanced`、`strict`、`custom` |
-| `warningEnabled` | `true` | 执行累计处罚时发送该级群内提醒 |
 | `punishmentLevels` | 3 级 | 多级累计处罚配置，最多 10 级；留空可关闭累计处罚 |
 | `burstDetectionEnabled` | `true` | 启用瞬时刷屏检测 |
 | `similarDetectionEnabled` | `true` | 启用相似复读检测 |
@@ -92,9 +91,9 @@ kick > mute > delete > warn > silent
 | `offenseCount` | 1～100 | 达到该同类违规次数后启用本级处罚 |
 | `action` | `warn` / `mute` / `kick` | 警告、禁言或踢出 |
 | `muteDurationMinutes` | 1～10080 | 禁言时长，仅 `mute` 生效 |
-| `messageTemplate` | 文本 | 本级群内提醒模板 |
+| `messageTemplate` | 空 | 本级群内提醒模板；留空时静默执行处罚 |
 
-模板支持 `{at}`、`{reason}`、`{action}`、`{muteMinutes}`、`{offenseCount}` 和 `{level}`。级别会按 `offenseCount` 从小到大整理；违规次数增长后，插件从所有已达到的级别中选择最强处罚，同为禁言时选择时长更长的一项，防止错误配置导致处罚降级。配置为空数组时只保留规则自身的撤回等即时处理，不再执行累计警告、禁言或踢出。
+模板支持 `{at}`、`{reason}`、`{action}`、`{muteMinutes}`、`{offenseCount}` 和 `{level}`。模板有内容时发送群内处罚通知，留空时直接执行处罚而不通知。级别会按 `offenseCount` 从小到大整理；违规次数增长后，插件从所有已达到的级别中选择最强处罚，同为禁言时选择时长更长的一项，防止错误配置导致处罚降级。配置为空数组时只保留规则自身的撤回等即时处理，不再执行累计警告、禁言或踢出。
 
 以下高级参数只在 `governancePreset` 为 `custom` 时生效：
 
