@@ -1,6 +1,35 @@
 import { Schema } from 'koishi'
 
 export type ModerationAction = 'warn' | 'delete' | 'mute' | 'kick' | 'silent'
+export type PunishmentAction = 'warn' | 'mute' | 'kick'
+
+export interface PunishmentLevelConfig {
+  offenseCount?: number
+  action?: PunishmentAction
+  muteDurationMinutes?: number
+  messageTemplate?: string
+}
+
+export const DEFAULT_PUNISHMENT_LEVELS: Required<PunishmentLevelConfig>[] = [
+  {
+    offenseCount: 1,
+    action: 'warn',
+    muteDurationMinutes: 10,
+    messageTemplate: '{at} 因【{reason}】受到警告，当前同类违规 {offenseCount} 次。',
+  },
+  {
+    offenseCount: 3,
+    action: 'mute',
+    muteDurationMinutes: 10,
+    messageTemplate: '{at} 因【{reason}】已被禁言 {muteMinutes} 分钟，当前同类违规 {offenseCount} 次。',
+  },
+  {
+    offenseCount: 5,
+    action: 'mute',
+    muteDurationMinutes: 60,
+    messageTemplate: '{at} 因多次【{reason}】已被禁言 {muteMinutes} 分钟，当前同类违规 {offenseCount} 次。',
+  },
+]
 
 const baseSchema = {
   welcomeMessage: Schema.string()
@@ -34,28 +63,30 @@ const moderationSchema = {
     .description('治理强度：宽松、均衡、严格或自定义'),
   warningEnabled: Schema.boolean()
     .default(true)
-    .description('执行治理动作时发送群内提醒'),
-  warningMessage: Schema.string()
-    .default('{at} 因【{reason}】，已执行：{action}。')
-    .description('治理提醒模板，支持 {at}、{reason}、{action}、{muteMinutes}'),
-  muteAfterOffenses: Schema.number()
-    .default(3)
-    .min(2)
-    .description('自定义模式下，同类违规达到该次数后禁言'),
-  muteDurationMinutes: Schema.number()
-    .default(10)
-    .min(1)
-    .max(1440)
-    .description('禁言时长，单位分钟'),
-  extendedMuteAfterOffenses: Schema.number()
-    .default(5)
-    .min(3)
-    .description('自定义模式下，同类违规达到该次数后加重禁言'),
-  extendedMuteDurationMinutes: Schema.number()
-    .default(60)
-    .min(1)
-    .max(10080)
-    .description('加重禁言时长，单位分钟'),
+    .description('执行累计处罚时发送群内提醒'),
+  punishmentLevels: Schema.array(Schema.object({
+    offenseCount: Schema.number()
+      .required()
+      .min(1)
+      .max(100)
+      .description('达到该同类违规次数后启用本级处罚'),
+    action: Schema.union([
+      Schema.const('warn').description('警告'),
+      Schema.const('mute').description('禁言'),
+      Schema.const('kick').description('踢出'),
+    ]).required().description('处罚动作'),
+    muteDurationMinutes: Schema.number()
+      .default(10)
+      .min(1)
+      .max(10080)
+      .description('禁言时长，仅禁言动作生效'),
+    messageTemplate: Schema.string()
+      .required()
+      .description('提醒模板，支持 {at}、{reason}、{action}、{muteMinutes}、{offenseCount}、{level}'),
+  }))
+    .default(DEFAULT_PUNISHMENT_LEVELS)
+    .max(10)
+    .description('累计处罚级别；数组项数量即处罚级数，留空可关闭累计处罚'),
   offenseWindowHours: Schema.number()
     .default(24)
     .min(1)
@@ -130,11 +161,7 @@ export interface Config {
     enabled?: boolean
     governancePreset?: 'relaxed' | 'balanced' | 'strict' | 'custom'
     warningEnabled?: boolean
-    warningMessage?: string
-    muteAfterOffenses?: number
-    muteDurationMinutes?: number
-    extendedMuteAfterOffenses?: number
-    extendedMuteDurationMinutes?: number
+    punishmentLevels?: PunishmentLevelConfig[]
     offenseWindowHours?: number
     burstDetectionEnabled?: boolean
     burstWindowSeconds?: number

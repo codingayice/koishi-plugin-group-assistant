@@ -1,5 +1,11 @@
 import { Context, h, Logger, Session } from 'koishi'
-import { Config, ModerationAction } from './config'
+import {
+  Config,
+  DEFAULT_PUNISHMENT_LEVELS,
+  ModerationAction,
+  PunishmentAction,
+  PunishmentLevelConfig,
+} from './config'
 
 const logger = new Logger('content-moderation')
 
@@ -100,6 +106,8 @@ interface ModerationDecision {
   signal: ModerationSignal
   action: ModerationAction
   muteMinutes: number
+  offenseCount: number
+  punishmentLevel: ResolvedPunishmentLevel | null
 }
 
 interface AiReviewResult {
@@ -161,12 +169,16 @@ interface ResolvedPolicy {
   similarityThreshold: number
   similarMinLength: number
   offenseWindowMs: number
-  muteAfterOffenses: number
-  muteDurationMinutes: number
-  extendedMuteAfterOffenses: number
-  extendedMuteDurationMinutes: number
+  punishmentLevels: ResolvedPunishmentLevel[]
   warningEnabled: boolean
-  warningMessage: string
+}
+
+interface ResolvedPunishmentLevel {
+  level: number
+  offenseCount: number
+  action: PunishmentAction
+  muteDurationMinutes: number
+  messageTemplate: string
 }
 
 type GovernancePreset = Exclude<NonNullable<FlatConfig['governancePreset']>, 'custom'>
@@ -182,15 +194,15 @@ const INTERNAL_POLICY = {
   maxSignalsPerMessage: 20,
   maxActivityUsers: 10_000,
   activityIdleMs: 2 * 60 * 60_000,
+  defaultMuteMinutes: 10,
 } as const
 
 const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
   | 'burstDetectionEnabled'
   | 'similarDetectionEnabled'
-  | 'muteDurationMinutes'
-  | 'extendedMuteDurationMinutes'
+  | 'punishmentLevels'
   | 'warningEnabled'
-  | 'warningMessage'>> = {
+>> = {
   relaxed: {
     burstWindowMs: 15_000,
     burstMessageCount: 10,
@@ -199,8 +211,6 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     similarityThreshold: 0.90,
     similarMinLength: 10,
     offenseWindowMs: 24 * 60 * 60_000,
-    muteAfterOffenses: 5,
-    extendedMuteAfterOffenses: 8,
   },
   balanced: {
     burstWindowMs: 10_000,
@@ -210,8 +220,6 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     similarityThreshold: 0.86,
     similarMinLength: 10,
     offenseWindowMs: 24 * 60 * 60_000,
-    muteAfterOffenses: 3,
-    extendedMuteAfterOffenses: 5,
   },
   strict: {
     burstWindowMs: 8_000,
@@ -221,17 +229,11 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     similarityThreshold: 0.82,
     similarMinLength: 8,
     offenseWindowMs: 24 * 60 * 60_000,
-    muteAfterOffenses: 2,
-    extendedMuteAfterOffenses: 4,
   },
 }
 
 function resolvePolicy(config: FlatConfig): ResolvedPolicy {
   const preset = config.governancePreset || 'balanced'
-  const customMuteAfter = clampInteger(config.muteAfterOffenses ?? 3, 2, 10)
-  const requestedExtendedMuteAfter = clampInteger(config.extendedMuteAfterOffenses ?? 5, 3, 20)
-  const muteDurationMinutes = clampInteger(config.muteDurationMinutes ?? 10, 1, 1440)
-  const requestedExtendedDuration = clampInteger(config.extendedMuteDurationMinutes ?? 60, 1, 10_080)
 
   const strategy = preset === 'custom'
     ? {
@@ -242,27 +244,44 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
         similarityThreshold: clampNumber(config.similarityThreshold ?? 0.86, 0.75, 0.95),
         similarMinLength: clampInteger(config.similarMinLength ?? 10, 4, 50),
         offenseWindowMs: clampInteger(config.offenseWindowHours ?? 24, 1, 168) * 60 * 60_000,
-        muteAfterOffenses: customMuteAfter,
-        extendedMuteAfterOffenses: Math.max(customMuteAfter + 1, requestedExtendedMuteAfter),
       }
     : PRESET_POLICIES[preset]
-
-  if (preset === 'custom' && requestedExtendedMuteAfter <= customMuteAfter) {
-    logger.warn(`加重禁言触发次数必须大于禁言触发次数，已调整为 ${customMuteAfter + 1}`)
-  }
-  if (requestedExtendedDuration <= muteDurationMinutes) {
-    logger.warn(`加重禁言时长必须大于禁言时长，已调整为 ${muteDurationMinutes + 1} 分钟`)
-  }
 
   return {
     ...strategy,
     burstDetectionEnabled: config.burstDetectionEnabled !== false,
     similarDetectionEnabled: config.similarDetectionEnabled !== false,
-    muteDurationMinutes,
-    extendedMuteDurationMinutes: Math.max(muteDurationMinutes + 1, requestedExtendedDuration),
+    punishmentLevels: resolvePunishmentLevels(config.punishmentLevels),
     warningEnabled: config.warningEnabled !== false,
-    warningMessage: config.warningMessage || '{at} 因【{reason}】，已执行：{action}。',
   }
+}
+
+function resolvePunishmentLevels(levels: PunishmentLevelConfig[] | undefined): ResolvedPunishmentLevel[] {
+  return (levels ?? DEFAULT_PUNISHMENT_LEVELS)
+    .slice(0, 10)
+    .map((item, index) => ({
+      level: index + 1,
+      offenseCount: clampInteger(item.offenseCount ?? index + 1, 1, 100),
+      action: normalizePunishmentAction(item.action),
+      muteDurationMinutes: clampInteger(item.muteDurationMinutes ?? 10, 1, 10_080),
+      messageTemplate: item.messageTemplate || defaultPunishmentTemplate(item.action),
+    }))
+    .sort((left, right) => left.offenseCount - right.offenseCount || left.level - right.level)
+    .map((item, index) => ({ ...item, level: index + 1 }))
+}
+
+function normalizePunishmentAction(value: unknown): PunishmentAction {
+  return value === 'mute' || value === 'kick' ? value : 'warn'
+}
+
+function defaultPunishmentTemplate(action: unknown) {
+  if (action === 'mute') {
+    return '{at} 因【{reason}】已被禁言 {muteMinutes} 分钟，当前同类违规 {offenseCount} 次。'
+  }
+  if (action === 'kick') {
+    return '{at} 因多次【{reason}】已被移出群聊，当前同类违规 {offenseCount} 次。'
+  }
+  return '{at} 因【{reason}】受到警告，当前同类违规 {offenseCount} 次。'
 }
 
 function clampInteger(value: number, minimum: number, maximum: number) {
@@ -667,7 +686,13 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
 
       const signal = createSignal('manual_action', 'manual', reason, reason, 'warn')
       const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
-      const decision: ModerationDecision = { signal, action: 'warn', muteMinutes: 0 }
+      const decision: ModerationDecision = {
+        signal,
+        action: 'warn',
+        muteMinutes: 0,
+        offenseCount: offense.offenseCount,
+        punishmentLevel: null,
+      }
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
       await session.send(`${h('at', { id: userId })} 管理员警告：${reason}`)
       return `已记录用户 ${userId} 的警告，同类累计 ${offense.offenseCount} 次。`
@@ -686,7 +711,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
       const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
       const decision = createDecision(signal, offense.offenseCount, policy)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
-      const result = await executeManualAction(session, userId, decision)
+      const result = await executeManualAction(session, userId, decision, policy)
       return `已记录用户 ${userId} 的处罚：${decision.action}，同类累计 ${offense.offenseCount} 次。${result ? `\n${result}` : ''}`
     })
 }
@@ -892,32 +917,36 @@ async function recordOffense(
 }
 
 function createDecision(signal: ModerationSignal, offenseCount: number, policy: ResolvedPolicy): ModerationDecision {
-  const baseMuteMinutes = signal.action === 'mute' ? policy.muteDurationMinutes : 0
-  if (offenseCount >= policy.extendedMuteAfterOffenses) {
-    if (getActionRank(signal.action) > getActionRank('mute')) {
-      return { signal, action: signal.action, muteMinutes: baseMuteMinutes }
-    }
-    return {
-      signal,
-      action: 'mute',
-      muteMinutes: policy.extendedMuteDurationMinutes,
-    }
-  }
-  if (offenseCount >= policy.muteAfterOffenses) {
-    if (getActionRank(signal.action) > getActionRank('mute')) {
-      return { signal, action: signal.action, muteMinutes: baseMuteMinutes }
-    }
-    return {
-      signal,
-      action: 'mute',
-      muteMinutes: policy.muteDurationMinutes,
-    }
-  }
+  const punishmentLevel = selectPunishmentLevel(policy.punishmentLevels, offenseCount)
+  const punishmentAction = punishmentLevel?.action || 'silent'
+  const action = getActionRank(punishmentAction) > getActionRank(signal.action)
+    ? punishmentAction
+    : signal.action
+  const baseMuteMinutes = signal.action === 'mute' ? INTERNAL_POLICY.defaultMuteMinutes : 0
+  const punishmentMuteMinutes = punishmentLevel?.action === 'mute'
+    ? punishmentLevel.muteDurationMinutes
+    : 0
+
   return {
     signal,
-    action: signal.action,
-    muteMinutes: baseMuteMinutes,
+    action,
+    muteMinutes: action === 'mute' ? Math.max(baseMuteMinutes, punishmentMuteMinutes) : 0,
+    offenseCount,
+    punishmentLevel,
   }
+}
+
+function selectPunishmentLevel(levels: ResolvedPunishmentLevel[], offenseCount: number) {
+  const unlocked = levels.filter((level) => offenseCount >= level.offenseCount)
+  return unlocked.sort((left, right) => {
+    const actionDifference = getActionRank(right.action) - getActionRank(left.action)
+    if (actionDifference) return actionDifference
+    if (left.action === 'mute' && right.action === 'mute') {
+      const durationDifference = right.muteDurationMinutes - left.muteDurationMinutes
+      if (durationDifference) return durationDifference
+    }
+    return right.offenseCount - left.offenseCount || right.level - left.level
+  })[0] || null
 }
 
 async function createAudit(
@@ -966,7 +995,13 @@ async function scheduleAiReview(
     evidence: signals.map((signal) => signal.evidence).join('；'),
     pattern: signals.map((signal) => signal.pattern).join('、').slice(0, 500),
   }
-  const decision: ModerationDecision = { signal: combinedSignal, action: 'silent', muteMinutes: 0 }
+  const decision: ModerationDecision = {
+    signal: combinedSignal,
+    action: 'silent',
+    muteMinutes: 0,
+    offenseCount: 0,
+    punishmentLevel: null,
+  }
 
   if (!config.aiReviewEnabled || !config.apiKey) {
     await createAudit(ctx, session, decision, 0, 'skipped', false, 'AI 复核未启用或未配置 API Key')
@@ -1120,7 +1155,7 @@ async function updateAiAudit(
 
 async function executeAction(session: Session, decision: ModerationDecision, policy: ResolvedPolicy) {
   if (decision.action === 'silent') return
-  await sendWarning(session, decision, policy)
+  await sendPunishmentNotice(session, session.userId || '', decision, policy)
   if (decision.action === 'warn') return
 
   await deleteMessage(session)
@@ -1131,9 +1166,17 @@ async function executeAction(session: Session, decision: ModerationDecision, pol
   }
 }
 
-async function executeManualAction(session: Session, userId: string, decision: ModerationDecision) {
+async function executeManualAction(
+  session: Session,
+  userId: string,
+  decision: ModerationDecision,
+  policy: ResolvedPolicy,
+) {
+  await sendPunishmentNotice(session, userId, decision, policy)
   if (decision.action === 'warn') {
-    await session.send(`${h('at', { id: userId })} 管理员警告：${decision.signal.publicReason}`)
+    if (!decision.punishmentLevel) {
+      await session.send(`${h('at', { id: userId })} 管理员警告：${decision.signal.publicReason}`)
+    }
     return ''
   }
   if (decision.action === 'mute') return muteMember(session, userId, decision.muteMinutes)
@@ -1141,15 +1184,23 @@ async function executeManualAction(session: Session, userId: string, decision: M
   return '手动撤回需要指定消息，已仅记录审计。'
 }
 
-async function sendWarning(session: Session, decision: ModerationDecision, policy: ResolvedPolicy) {
-  if (!policy.warningEnabled) return
+async function sendPunishmentNotice(
+  session: Session,
+  userId: string,
+  decision: ModerationDecision,
+  policy: ResolvedPolicy,
+) {
+  const level = decision.punishmentLevel
+  if (!policy.warningEnabled || !level) return
   const replacements: Record<string, string> = {
-    '{at}': String(h('at', { id: session.userId })),
+    '{at}': String(h('at', { id: userId })),
     '{reason}': decision.signal.publicReason,
-    '{action}': formatAction(decision.action),
-    '{muteMinutes}': String(decision.muteMinutes || 0),
+    '{action}': formatAction(level.action),
+    '{muteMinutes}': String(level.action === 'mute' ? level.muteDurationMinutes : 0),
+    '{offenseCount}': String(decision.offenseCount),
+    '{level}': String(level.level),
   }
-  let message = policy.warningMessage
+  let message = level.messageTemplate
   for (const [placeholder, value] of Object.entries(replacements)) {
     message = message.split(placeholder).join(value)
   }
