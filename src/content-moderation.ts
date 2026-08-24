@@ -149,18 +149,29 @@ interface SimilarMessage {
   createdAt: number
 }
 
+interface ResolvedPolicy {
+  burstDetectionEnabled: boolean
+  burstWindowMs: number
+  burstMessageCount: number
+  similarDetectionEnabled: boolean
+  similarWindowMs: number
+  similarMessageCount: number
+  similarityThreshold: number
+  similarMinLength: number
+  offenseWindowMs: number
+  muteAfterOffenses: number
+  muteDurationMinutes: number
+  extendedMuteAfterOffenses: number
+  extendedMuteDurationMinutes: number
+  warningEnabled: boolean
+  warningMessage: string
+}
+
+type GovernancePreset = Exclude<NonNullable<FlatConfig['governancePreset']>, 'custom'>
+
 const INTERNAL_POLICY = {
   ruleCacheMs: 30_000,
-  burstWindowMs: 10_000,
-  burstMessageCount: 6,
-  similarWindowMs: 60 * 60_000,
-  similarMessageCount: 3,
-  similarThreshold: 0.86,
-  similarMinLength: 10,
   similarHistoryLimit: 20,
-  offenseWindowMs: 24 * 60 * 60_000,
-  shortMuteAfter: 3,
-  longMuteAfter: 5,
   aiTimeoutMs: 8_000,
   aiRetries: 2,
   aiQueueConcurrency: 2,
@@ -171,8 +182,98 @@ const INTERNAL_POLICY = {
   activityIdleMs: 2 * 60 * 60_000,
 } as const
 
+const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
+  | 'burstDetectionEnabled'
+  | 'similarDetectionEnabled'
+  | 'muteDurationMinutes'
+  | 'extendedMuteDurationMinutes'
+  | 'warningEnabled'
+  | 'warningMessage'>> = {
+  relaxed: {
+    burstWindowMs: 15_000,
+    burstMessageCount: 10,
+    similarWindowMs: 60 * 60_000,
+    similarMessageCount: 5,
+    similarityThreshold: 0.90,
+    similarMinLength: 10,
+    offenseWindowMs: 24 * 60 * 60_000,
+    muteAfterOffenses: 5,
+    extendedMuteAfterOffenses: 8,
+  },
+  balanced: {
+    burstWindowMs: 10_000,
+    burstMessageCount: 6,
+    similarWindowMs: 60 * 60_000,
+    similarMessageCount: 3,
+    similarityThreshold: 0.86,
+    similarMinLength: 10,
+    offenseWindowMs: 24 * 60 * 60_000,
+    muteAfterOffenses: 3,
+    extendedMuteAfterOffenses: 5,
+  },
+  strict: {
+    burstWindowMs: 8_000,
+    burstMessageCount: 4,
+    similarWindowMs: 60 * 60_000,
+    similarMessageCount: 3,
+    similarityThreshold: 0.82,
+    similarMinLength: 8,
+    offenseWindowMs: 24 * 60 * 60_000,
+    muteAfterOffenses: 2,
+    extendedMuteAfterOffenses: 4,
+  },
+}
+
+function resolvePolicy(config: FlatConfig): ResolvedPolicy {
+  const preset = config.governancePreset || 'balanced'
+  const customMuteAfter = clampInteger(config.muteAfterOffenses ?? 3, 2, 10)
+  const requestedExtendedMuteAfter = clampInteger(config.extendedMuteAfterOffenses ?? 5, 3, 20)
+  const muteDurationMinutes = clampInteger(config.muteDurationMinutes ?? 10, 1, 1440)
+  const requestedExtendedDuration = clampInteger(config.extendedMuteDurationMinutes ?? 60, 1, 10_080)
+
+  const strategy = preset === 'custom'
+    ? {
+        burstWindowMs: clampInteger(config.burstWindowSeconds ?? 10, 5, 60) * 1000,
+        burstMessageCount: clampInteger(config.burstMessageCount ?? 6, 3, 20),
+        similarWindowMs: clampInteger(config.similarWindowMinutes ?? 60, 10, 1440) * 60_000,
+        similarMessageCount: clampInteger(config.similarMessageCount ?? 3, 2, 10),
+        similarityThreshold: clampNumber(config.similarityThreshold ?? 0.86, 0.75, 0.95),
+        similarMinLength: clampInteger(config.similarMinLength ?? 10, 4, 50),
+        offenseWindowMs: clampInteger(config.offenseWindowHours ?? 24, 1, 168) * 60 * 60_000,
+        muteAfterOffenses: customMuteAfter,
+        extendedMuteAfterOffenses: Math.max(customMuteAfter + 1, requestedExtendedMuteAfter),
+      }
+    : PRESET_POLICIES[preset]
+
+  if (preset === 'custom' && requestedExtendedMuteAfter <= customMuteAfter) {
+    logger.warn(`加重禁言触发次数必须大于禁言触发次数，已调整为 ${customMuteAfter + 1}`)
+  }
+  if (requestedExtendedDuration <= muteDurationMinutes) {
+    logger.warn(`加重禁言时长必须大于禁言时长，已调整为 ${muteDurationMinutes + 1} 分钟`)
+  }
+
+  return {
+    ...strategy,
+    burstDetectionEnabled: config.burstDetectionEnabled !== false,
+    similarDetectionEnabled: config.similarDetectionEnabled !== false,
+    muteDurationMinutes,
+    extendedMuteDurationMinutes: Math.max(muteDurationMinutes + 1, requestedExtendedDuration),
+    warningEnabled: config.warningEnabled !== false,
+    warningMessage: config.warningMessage || '{at} 检测到【{pattern}】，执行动作：{action}。',
+  }
+}
+
+function clampInteger(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, Math.round(value)))
+}
+
+function clampNumber(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value))
+}
+
 export function registerContentModeration(ctx: Context, config: FlatConfig) {
   extendTables(ctx)
+  const policy = resolvePolicy(config)
   const activity = new Map<string, MessageActivity>()
   const cache: RuleCache = {
     expiresAt: 0,
@@ -184,19 +285,19 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
   }
 
   const aiQueue = new AiReviewQueue(
-    (job) => processAiReviewJob(ctx, config, job),
+    (job) => processAiReviewJob(ctx, config, policy, job),
     INTERNAL_POLICY.aiQueueConcurrency,
     INTERNAL_POLICY.aiQueueLimit,
   )
 
   registerRuleCommands(ctx, config, clearCache)
   registerAuditCommand(ctx, config)
-  registerOffenseCommand(ctx, config)
+  registerOffenseCommand(ctx, config, policy)
   registerAccessListCommands(ctx, config)
-  registerManualPunishmentCommands(ctx, config)
+  registerManualPunishmentCommands(ctx, config, policy)
 
   ctx.setInterval(() => {
-    void pruneExpiredData(ctx, config).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
+    void pruneExpiredData(ctx, config, policy).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
   }, 6 * 60 * 60_000)
   ctx.on('dispose', () => aiQueue.dispose())
 
@@ -216,7 +317,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         signals.push(createSignal('blacklist_user', 'access', '黑名单用户发言', 'delete'))
       }
 
-      signals.push(...detectBehaviorSignals(session, views, activity))
+      signals.push(...detectBehaviorSignals(session, views, activity, policy))
       const ruleIndex = await getRuleIndex(ctx, cache)
       signals.push(...findContentSignals(ruleIndex, session.guildId, views))
 
@@ -232,10 +333,10 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
 
       if (!selected) return next()
 
-      const offense = await recordOffense(ctx, session.guildId, userId, selected)
-      const decision = createDecision(selected, offense.offenseCount, config)
+      const offense = await recordOffense(ctx, session.guildId, userId, selected, policy)
+      const decision = createDecision(selected, offense.offenseCount, policy)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '')
-      await executeAction(session, decision)
+      await executeAction(session, decision, policy)
 
       if (getActionRank(decision.action) <= getActionRank('warn')) return next()
       return
@@ -440,7 +541,7 @@ function registerAuditCommand(ctx: Context, config: FlatConfig) {
     })
 }
 
-function registerOffenseCommand(ctx: Context, config: FlatConfig) {
+function registerOffenseCommand(ctx: Context, config: FlatConfig, policy: ResolvedPolicy) {
   ctx.command('违规用户', '查看本群有效违规状态')
     .option('limit', '-n <limit> 查询条数')
     .action(async ({ session, options }) => {
@@ -448,7 +549,7 @@ function registerOffenseCommand(ctx: Context, config: FlatConfig) {
       if (!isPrivileged(session, config)) return '你没有权限查看违规用户。'
 
       const limit = Math.min(Math.max(Number(options.limit) || 10, 1), 30)
-      const cutoff = Date.now() - INTERNAL_POLICY.offenseWindowMs
+      const cutoff = Date.now() - policy.offenseWindowMs
       const offenses = await ctx.database.get('group-moderation-offense', {
         guildId: session.guildId || '',
       })
@@ -548,7 +649,7 @@ function registerAccessListCommand(
     })
 }
 
-function registerManualPunishmentCommands(ctx: Context, config: FlatConfig) {
+function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, policy: ResolvedPolicy) {
   ctx.command('警告 <userId:string> [reason:text]', '手动警告用户并记录违规')
     .action(async ({ session }, userId, reason = '管理员手动警告') => {
       if (!session) return
@@ -556,7 +657,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig) {
       if (!userId) return '请提供要警告的用户 ID。'
 
       const signal = createSignal('manual_action', 'manual', reason, 'warn')
-      const offense = await recordOffense(ctx, session.guildId || '', userId, signal)
+      const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
       const decision: ModerationDecision = { signal, action: 'warn', muteMinutes: 0 }
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
       await session.send(`${h('at', { id: userId })} 管理员警告：${reason}`)
@@ -573,8 +674,8 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig) {
       const action = normalizeAction(options.action, 'warn')
       if (action === 'silent') return '手动处罚不支持 silent 动作。'
       const signal = createSignal('manual_action', 'manual', reason, action)
-      const offense = await recordOffense(ctx, session.guildId || '', userId, signal)
-      const decision = createDecision(signal, offense.offenseCount, config)
+      const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
+      const decision = createDecision(signal, offense.offenseCount, policy)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
       const result = await executeManualAction(session, userId, decision)
       return `已记录用户 ${userId} 的处罚：${decision.action}，同类累计 ${offense.offenseCount} 次。${result ? `\n${result}` : ''}`
@@ -647,6 +748,7 @@ function detectBehaviorSignals(
   session: Session,
   views: MessageViews,
   activity: Map<string, MessageActivity>,
+  policy: ResolvedPolicy,
 ) {
   const signals: ModerationSignal[] = []
   const now = Date.now()
@@ -654,14 +756,23 @@ function detectBehaviorSignals(
   const key = `${session.guildId}:${session.userId || 'unknown'}`
   const item = activity.get(key) || { timestamps: [], similarHistory: [], updatedAt: now }
   item.updatedAt = now
-  item.timestamps = item.timestamps.filter((time) => now - time <= INTERNAL_POLICY.burstWindowMs)
-  item.timestamps.push(now)
-
-  if (item.timestamps.length >= INTERNAL_POLICY.burstMessageCount) {
-    signals.push(createSignal('spam_burst', 'behavior', '10 秒内连续发送至少 6 条消息', 'delete'))
+  if (policy.burstDetectionEnabled) {
+    item.timestamps = item.timestamps.filter((time) => now - time <= policy.burstWindowMs)
+    item.timestamps.push(now)
+    if (item.timestamps.length >= policy.burstMessageCount) {
+      const seconds = Math.round(policy.burstWindowMs / 1000)
+      signals.push(createSignal(
+        'spam_burst',
+        'behavior',
+        `${seconds} 秒内连续发送至少 ${policy.burstMessageCount} 条消息`,
+        'delete',
+      ))
+    }
+  } else {
+    item.timestamps = []
   }
 
-  if (updateSimilarRepeatActivity(views.similarityText, now, item)) {
+  if (updateSimilarRepeatActivity(views.similarityText, now, item, policy)) {
     signals.push(createSignal('similar_repeat', 'behavior', '长窗口内多次发送高度相似内容', 'delete'))
   }
 
@@ -670,23 +781,33 @@ function detectBehaviorSignals(
   return signals
 }
 
-function updateSimilarRepeatActivity(normalized: string, now: number, item: MessageActivity) {
+function updateSimilarRepeatActivity(
+  normalized: string,
+  now: number,
+  item: MessageActivity,
+  policy: ResolvedPolicy,
+) {
+  if (!policy.similarDetectionEnabled) {
+    item.similarHistory = []
+    return false
+  }
+
   item.similarHistory = item.similarHistory.filter((message) => {
-    return now - message.createdAt <= INTERNAL_POLICY.similarWindowMs
+    return now - message.createdAt <= policy.similarWindowMs
   })
 
-  if (normalized.length < INTERNAL_POLICY.similarMinLength) {
+  if (normalized.length < policy.similarMinLength) {
     item.similarHistory = item.similarHistory.slice(-INTERNAL_POLICY.similarHistoryLimit)
     return false
   }
 
   const similarCount = item.similarHistory.filter((message) => {
-    return isSimilarByEditDistance(normalized, message.normalized, INTERNAL_POLICY.similarThreshold)
+    return isSimilarByEditDistance(normalized, message.normalized, policy.similarityThreshold)
   }).length + 1
 
   item.similarHistory.push({ normalized, createdAt: now })
   item.similarHistory = item.similarHistory.slice(-INTERNAL_POLICY.similarHistoryLimit)
-  return similarCount >= INTERNAL_POLICY.similarMessageCount
+  return similarCount >= policy.similarMessageCount
 }
 
 function pruneActivity(activity: Map<string, MessageActivity>, now: number) {
@@ -715,6 +836,7 @@ async function recordOffense(
   guildId: string,
   userId: string,
   signal: ModerationSignal,
+  policy: ResolvedPolicy,
 ) {
   const category = getOffenseCategory(signal)
   const [existing] = await ctx.database.get('group-moderation-offense', {
@@ -723,7 +845,7 @@ async function recordOffense(
     category,
   })
   const now = new Date().toISOString()
-  const expired = !existing || Date.now() - parseTimestamp(existing.updatedAt) > INTERNAL_POLICY.offenseWindowMs
+  const expired = !existing || Date.now() - parseTimestamp(existing.updatedAt) > policy.offenseWindowMs
   const offenseCount = expired ? 1 : existing.offenseCount + 1
 
   if (!existing) {
@@ -750,26 +872,26 @@ async function recordOffense(
   return { ...existing, offenseCount, updatedAt: now }
 }
 
-function createDecision(signal: ModerationSignal, offenseCount: number, config: FlatConfig): ModerationDecision {
-  const baseMuteMinutes = signal.action === 'mute' ? Math.max(1, config.shortMuteMinutes ?? 10) : 0
-  if (offenseCount >= INTERNAL_POLICY.longMuteAfter) {
+function createDecision(signal: ModerationSignal, offenseCount: number, policy: ResolvedPolicy): ModerationDecision {
+  const baseMuteMinutes = signal.action === 'mute' ? policy.muteDurationMinutes : 0
+  if (offenseCount >= policy.extendedMuteAfterOffenses) {
     if (getActionRank(signal.action) > getActionRank('mute')) {
       return { signal, action: signal.action, muteMinutes: baseMuteMinutes }
     }
     return {
       signal,
       action: 'mute',
-      muteMinutes: Math.max(1, config.longMuteMinutes ?? 60),
+      muteMinutes: policy.extendedMuteDurationMinutes,
     }
   }
-  if (offenseCount >= INTERNAL_POLICY.shortMuteAfter) {
+  if (offenseCount >= policy.muteAfterOffenses) {
     if (getActionRank(signal.action) > getActionRank('mute')) {
       return { signal, action: signal.action, muteMinutes: baseMuteMinutes }
     }
     return {
       signal,
       action: 'mute',
-      muteMinutes: Math.max(1, config.shortMuteMinutes ?? 10),
+      muteMinutes: policy.muteDurationMinutes,
     }
   }
   return {
@@ -842,7 +964,12 @@ async function scheduleAiReview(
   }
 }
 
-async function processAiReviewJob(ctx: Context, config: FlatConfig, job: AiReviewJob) {
+async function processAiReviewJob(
+  ctx: Context,
+  config: FlatConfig,
+  policy: ResolvedPolicy,
+  job: AiReviewJob,
+) {
   let lastError: unknown
   for (let attempt = 0; attempt <= INTERNAL_POLICY.aiRetries; attempt += 1) {
     try {
@@ -869,8 +996,9 @@ async function processAiReviewJob(ctx: Context, config: FlatConfig, job: AiRevie
         job.session.guildId || '',
         job.session.userId || '',
         confirmedSignal,
+        policy,
       )
-      const decision = createDecision(confirmedSignal, offense.offenseCount, config)
+      const decision = createDecision(confirmedSignal, offense.offenseCount, policy)
       await updateAiAudit(ctx, job.auditId, {
         status: 'confirmed',
         action: decision.action,
@@ -878,7 +1006,7 @@ async function processAiReviewJob(ctx: Context, config: FlatConfig, job: AiRevie
         reviewedByAi: true,
         aiReason: result.reason || result.category,
       })
-      await executeAction(job.session, decision)
+      await executeAction(job.session, decision, policy)
       return
     } catch (err) {
       lastError = err
@@ -969,9 +1097,9 @@ async function updateAiAudit(
   })
 }
 
-async function executeAction(session: Session, decision: ModerationDecision) {
+async function executeAction(session: Session, decision: ModerationDecision, policy: ResolvedPolicy) {
   if (decision.action === 'silent') return
-  await sendWarning(session, decision)
+  await sendWarning(session, decision, policy)
   if (decision.action === 'warn') return
 
   await deleteMessage(session)
@@ -992,11 +1120,19 @@ async function executeManualAction(session: Session, userId: string, decision: M
   return '手动撤回需要指定消息，已仅记录审计。'
 }
 
-async function sendWarning(session: Session, decision: ModerationDecision) {
-  const actionText = decision.action === 'mute'
-    ? `并禁言 ${decision.muteMinutes} 分钟`
-    : decision.action === 'delete' ? '并撤回消息' : '，请注意群规'
-  await session.send(`${h('at', { id: session.userId })} 检测到【${decision.signal.pattern}】${actionText}。`)
+async function sendWarning(session: Session, decision: ModerationDecision, policy: ResolvedPolicy) {
+  if (!policy.warningEnabled) return
+  const replacements: Record<string, string> = {
+    '{at}': String(h('at', { id: session.userId })),
+    '{pattern}': decision.signal.pattern,
+    '{action}': formatAction(decision.action),
+    '{muteMinutes}': String(decision.muteMinutes || 0),
+  }
+  let message = policy.warningMessage
+  for (const [placeholder, value] of Object.entries(replacements)) {
+    message = message.split(placeholder).join(value)
+  }
+  if (message.trim()) await session.send(message)
 }
 
 async function deleteMessage(session: Session) {
@@ -1228,6 +1364,14 @@ function formatScope(scope: RuleScope) {
   return scope === 'redline' ? '红线' : '敏感'
 }
 
+function formatAction(action: ModerationAction) {
+  if (action === 'warn') return '警告'
+  if (action === 'delete') return '撤回'
+  if (action === 'mute') return '禁言'
+  if (action === 'kick') return '踢出'
+  return '记录'
+}
+
 function formatRule(rule: ModerationRule) {
   return `#${rule.id} [${rule.enabled ? '启用' : '禁用'}] ${formatScope(rule.scope)}/关键词【${rule.pattern}】`
 }
@@ -1267,7 +1411,7 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
 
-async function pruneExpiredData(ctx: Context, config: FlatConfig) {
+async function pruneExpiredData(ctx: Context, config: FlatConfig, policy: ResolvedPolicy) {
   const auditCutoff = Date.now() - Math.max(1, config.auditRetentionDays ?? 30) * 24 * 60 * 60_000
   const audits = await ctx.database.get('group-moderation-audit', {})
   const expiredAuditIds = audits
@@ -1277,7 +1421,7 @@ async function pruneExpiredData(ctx: Context, config: FlatConfig) {
     await ctx.database.remove('group-moderation-audit', { id })
   }
 
-  const offenseCutoff = Date.now() - INTERNAL_POLICY.offenseWindowMs
+  const offenseCutoff = Date.now() - policy.offenseWindowMs
   const offenses = await ctx.database.get('group-moderation-offense', {})
   const expiredOffenseIds = offenses
     .filter((record) => parseTimestamp(record.updatedAt) < offenseCutoff)

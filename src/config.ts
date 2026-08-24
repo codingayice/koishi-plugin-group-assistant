@@ -24,14 +24,81 @@ const moderationSchema = {
   enabled: Schema.boolean()
     .default(true)
     .description('启用群治理'),
-  shortMuteMinutes: Schema.number()
+  governancePreset: Schema.union([
+    Schema.const('relaxed').description('宽松'),
+    Schema.const('balanced').description('均衡'),
+    Schema.const('strict').description('严格'),
+    Schema.const('custom').description('自定义'),
+  ])
+    .default('balanced')
+    .description('治理强度：宽松、均衡、严格或自定义'),
+  warningEnabled: Schema.boolean()
+    .default(true)
+    .description('执行治理动作时发送群内提醒'),
+  warningMessage: Schema.string()
+    .default('{at} 检测到【{pattern}】，执行动作：{action}。')
+    .description('治理提醒模板，支持 {at}、{pattern}、{action}、{muteMinutes}'),
+  muteAfterOffenses: Schema.number()
+    .default(3)
+    .min(2)
+    .description('自定义模式下，同类违规达到该次数后禁言'),
+  muteDurationMinutes: Schema.number()
     .default(10)
     .min(1)
-    .description('同类违规累计 3 次后的禁言时长，单位分钟'),
-  longMuteMinutes: Schema.number()
+    .max(1440)
+    .description('禁言时长，单位分钟'),
+  extendedMuteAfterOffenses: Schema.number()
+    .default(5)
+    .min(3)
+    .description('自定义模式下，同类违规达到该次数后加重禁言'),
+  extendedMuteDurationMinutes: Schema.number()
     .default(60)
     .min(1)
-    .description('同类违规累计 5 次后的禁言时长，单位分钟'),
+    .max(10080)
+    .description('加重禁言时长，单位分钟'),
+  offenseWindowHours: Schema.number()
+    .default(24)
+    .min(1)
+    .max(168)
+    .description('自定义模式下，同类违规累计窗口，单位小时'),
+  burstDetectionEnabled: Schema.boolean()
+    .default(true)
+    .description('启用瞬时刷屏检测'),
+  burstWindowSeconds: Schema.number()
+    .default(10)
+    .min(5)
+    .max(60)
+    .description('自定义模式下，瞬时刷屏统计窗口，单位秒'),
+  burstMessageCount: Schema.number()
+    .default(6)
+    .min(3)
+    .max(20)
+    .description('自定义模式下，窗口内达到该消息数时判定刷屏'),
+  similarDetectionEnabled: Schema.boolean()
+    .default(true)
+    .description('启用相似复读检测'),
+  similarWindowMinutes: Schema.number()
+    .default(60)
+    .min(10)
+    .max(1440)
+    .description('自定义模式下，相似消息统计窗口，单位分钟'),
+  similarMessageCount: Schema.number()
+    .default(3)
+    .min(2)
+    .max(10)
+    .description('自定义模式下，达到该相似消息数时判定复读'),
+  similarityThreshold: Schema.number()
+    .default(0.86)
+    .min(0.75)
+    .max(0.95)
+    .step(0.01)
+    .role('slider')
+    .description('自定义模式下，编辑距离相似度阈值'),
+  similarMinLength: Schema.number()
+    .default(10)
+    .min(4)
+    .max(50)
+    .description('自定义模式下，参与相似检测的最短文本长度'),
   auditRetentionDays: Schema.number()
     .default(30)
     .min(1)
@@ -61,8 +128,22 @@ export interface Config {
   }
   moderation: {
     enabled?: boolean
-    shortMuteMinutes?: number
-    longMuteMinutes?: number
+    governancePreset?: 'relaxed' | 'balanced' | 'strict' | 'custom'
+    warningEnabled?: boolean
+    warningMessage?: string
+    muteAfterOffenses?: number
+    muteDurationMinutes?: number
+    extendedMuteAfterOffenses?: number
+    extendedMuteDurationMinutes?: number
+    offenseWindowHours?: number
+    burstDetectionEnabled?: boolean
+    burstWindowSeconds?: number
+    burstMessageCount?: number
+    similarDetectionEnabled?: boolean
+    similarWindowMinutes?: number
+    similarMessageCount?: number
+    similarityThreshold?: number
+    similarMinLength?: number
     auditRetentionDays?: number
   }
   deepseek: {
