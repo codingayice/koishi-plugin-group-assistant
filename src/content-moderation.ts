@@ -440,8 +440,16 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
     pendingImports.delete(key)
 
     try {
+      await session.send('已收到 TXT 文件，正在下载并读取，请稍候。')
       const content = await downloadWordlist(ctx, source)
-      const result = await importWordlist(ctx, session, pending.scope, content, clearCache)
+      const result = await importWordlist(
+        ctx,
+        session,
+        pending.scope,
+        content,
+        clearCache,
+        createImportProgressReporter(session),
+      )
       if (result) await session.send(result)
       return
     } catch (err) {
@@ -472,7 +480,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       const scope = parseRuleScope(scopeInput)
       if (!scope) return '规则分类只能是“红线”或“敏感”。'
       if (!content?.trim()) return '请在命令后粘贴一行一个关键词的内容。'
-      return importWordlist(ctx, session, scope, content, clearCache)
+      return importWordlist(ctx, session, scope, content, clearCache, createImportProgressReporter(session))
     })
 
   ctx.command('规则.导入 <scope:string> [content:text]', '导入 TXT 群治理关键词')
@@ -491,15 +499,25 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       const source = getFileSource(session)
       if (source) {
         try {
+          await session.send('已收到 TXT 文件，正在下载并读取，请稍候。')
           const fileContent = await downloadWordlist(ctx, source)
-          return importWordlist(ctx, session, scope, fileContent, clearCache)
+          return importWordlist(
+            ctx,
+            session,
+            scope,
+            fileContent,
+            clearCache,
+            createImportProgressReporter(session),
+          )
         } catch (err) {
           logger.warn(`读取词库文件失败: ${err}`)
           return '词库文件读取失败，请确认发送的是可下载的 UTF-8 文本文件。'
         }
       }
 
-      if (content?.trim()) return importWordlist(ctx, session, scope, content, clearCache)
+      if (content?.trim()) {
+        return importWordlist(ctx, session, scope, content, clearCache, createImportProgressReporter(session))
+      }
       if (!session.guildId || !session.userId) return '文件导入只能在群聊中使用。'
 
       pendingImports.set(getImportKey(session), {
@@ -550,6 +568,8 @@ interface FileElementLike {
   attrs?: Record<string, unknown>
 }
 
+type ImportProgressReporter = (message: string) => Promise<void>
+
 function getImportKey(session: Session) {
   return session.guildId && session.userId ? `${session.guildId}:${session.userId}` : ''
 }
@@ -579,6 +599,7 @@ async function importWordlist(
   scope: RuleScope,
   content: string,
   clearCache: () => void,
+  reportProgress?: ImportProgressReporter,
 ) {
   if (!session.guildId) return '词库只能导入当前群。'
 
@@ -587,6 +608,11 @@ async function importWordlist(
   if (!parsed.patterns.length) {
     return `没有发现可导入的${formatScope(scope)}关键词：读取 ${parsed.readCount} 条，无效 ${parsed.invalidCount} 条。`
   }
+
+  await reportImportProgress(
+    reportProgress,
+    `词库读取完成：有效关键词 ${parsed.patterns.length} 条，开始写入${formatScope(scope)}规则。`,
+  )
 
   const existing = await ctx.database.get('group-moderation-rule', {
     guildId: session.guildId,
@@ -603,6 +629,8 @@ async function importWordlist(
   let createdCount = 0
   let failedCount = 0
   const now = new Date().toISOString()
+  const progressStep = Math.max(100, Math.ceil(patterns.length / 10 / 100) * 100)
+  let lastProgress = 0
 
   for (let index = 0; index < patterns.length; index += 100) {
     const batch = patterns.slice(index, index + 100)
@@ -618,12 +646,34 @@ async function importWordlist(
     }))
     createdCount += results.filter((result) => result.status === 'fulfilled').length
     failedCount += results.filter((result) => result.status === 'rejected').length
+
+    const processedCount = Math.min(index + batch.length, patterns.length)
+    if (processedCount === patterns.length || processedCount - lastProgress >= progressStep) {
+      lastProgress = processedCount
+      await reportImportProgress(
+        reportProgress,
+        `词库导入进度：${processedCount}/${patterns.length}（${Math.round(processedCount / patterns.length * 100)}%），已新增 ${createdCount} 条。`,
+      )
+    }
   }
 
   if (createdCount) clearCache()
   const duplicateCount = parsed.duplicateCount + databaseDuplicateCount
   const failure = failedCount ? `，失败 ${failedCount} 条` : ''
   return `${formatScope(scope)}词库导入完成：读取 ${parsed.readCount} 条，新增 ${createdCount} 条，重复 ${duplicateCount} 条，无效 ${parsed.invalidCount} 条${failure}。`
+}
+
+function createImportProgressReporter(session: Session): ImportProgressReporter {
+  return (message) => session.send(message).then(() => undefined)
+}
+
+async function reportImportProgress(reporter: ImportProgressReporter | undefined, message: string) {
+  if (!reporter) return
+  try {
+    await reporter(message)
+  } catch (err) {
+    logger.warn(`发送词库导入进度失败：${err}`)
+  }
 }
 
 async function createRule(
