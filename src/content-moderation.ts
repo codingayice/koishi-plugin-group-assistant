@@ -454,7 +454,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
   ctx.command('规则', '管理本群红线与敏感规则')
     .action(() => '用法：规则 添加/批量添加/导入 <红线|敏感>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
 
-  ctx.command('规则 添加 <scope:string> <pattern:text>', '添加群治理关键词')
+  ctx.command('规则.添加 <scope:string> <pattern:text>', '添加群治理关键词')
     .action(async ({ session }, scopeInput, pattern) => {
       if (!session) return
       if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
@@ -464,7 +464,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       return createRule(ctx, session, scope, pattern || '', clearCache)
     })
 
-  ctx.command('规则 批量添加 <scope:string> <content:text>', '批量添加群治理关键词')
+  ctx.command('规则.批量添加 <scope:string> <content:text>', '批量添加群治理关键词')
     .action(async ({ session }, scopeInput, content) => {
       if (!session) return
       if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
@@ -475,7 +475,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       return importWordlist(ctx, session, scope, content, clearCache)
     })
 
-  ctx.command('规则 导入 <scope:string> [content:text]', '导入 TXT 群治理关键词')
+  ctx.command('规则.导入 <scope:string> [content:text]', '导入 TXT 群治理关键词')
     .action(async ({ session }, scopeInput, content) => {
       if (!session) return
       if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
@@ -509,28 +509,28 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       return `请在 120 秒内发送 UTF-8 TXT 词库文件，目标分类：${formatScope(scope)}。`
     })
 
-  ctx.command('规则 删除 <id:number>', '删除群治理规则')
+  ctx.command('规则.删除 <id:number>', '删除群治理规则')
     .action(async ({ session }, id) => {
       if (!session) return
       if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
       return removeRule(ctx, Number(id), session, clearCache)
     })
 
-  ctx.command('规则 启用 <id:number>', '启用群治理规则')
+  ctx.command('规则.启用 <id:number>', '启用群治理规则')
     .action(async ({ session }, id) => {
       if (!session) return
       if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
       return setRuleEnabled(ctx, Number(id), true, session, clearCache)
     })
 
-  ctx.command('规则 禁用 <id:number>', '禁用群治理规则')
+  ctx.command('规则.禁用 <id:number>', '禁用群治理规则')
     .action(async ({ session }, id) => {
       if (!session) return
       if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
       return setRuleEnabled(ctx, Number(id), false, session, clearCache)
     })
 
-  ctx.command('规则 列表 [scope:string]', '查看本群治理规则')
+  ctx.command('规则.列表 [scope:string]', '查看本群治理规则')
     .action(async ({ session }, scopeInput) => {
       if (!session) return
       if (!isPrivileged(session, config)) return '你没有权限查看群治理规则。'
@@ -769,7 +769,7 @@ function registerAccessListCommand(
   commandName: string,
   listType: AccessListType,
 ) {
-  ctx.command(`${commandName} 添加 <userId:string> [reason:text]`, `添加${commandName}用户`)
+  ctx.command(`${commandName}.添加 <userId:string> [reason:text]`, `添加${commandName}用户`)
     .action(async ({ session }, userId, reason = '') => {
       if (!session) return
       if (!isPrivileged(session, config)) return `你没有权限管理${commandName}。`
@@ -794,7 +794,7 @@ function registerAccessListCommand(
       return `已添加本群${commandName} #${entry.id}：${userId}${reason ? `，原因：${reason}` : ''}`
     })
 
-  ctx.command(`${commandName} 删除 <userId:string>`, `删除${commandName}用户`)
+  ctx.command(`${commandName}.删除 <userId:string>`, `删除${commandName}用户`)
     .action(async ({ session }, userId) => {
       if (!session) return
       if (!isPrivileged(session, config)) return `你没有权限管理${commandName}。`
@@ -815,7 +815,7 @@ function registerAccessListCommand(
       return `已删除本群${commandName}用户 ${userId}。`
     })
 
-  ctx.command(`${commandName} 列表`, `查看${commandName}`)
+  ctx.command(`${commandName}.列表`, `查看${commandName}`)
     .action(async ({ session }) => {
       if (!session) return
       if (!isPrivileged(session, config)) return `你没有权限查看${commandName}。`
