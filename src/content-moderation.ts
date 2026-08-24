@@ -470,10 +470,6 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
         await session.send(link.error)
         return
       }
-      if (isLocalWordlistPath(session.content)) {
-        await session.send('不支持读取用户本地路径，请发送 QQ 文件附件或 HTTPS 词库链接。')
-        return
-      }
       logger.info(`待处理词库消息未识别到可下载文件：群 ${session.guildId}，用户 ${session.userId}`)
       return next()
     }
@@ -564,7 +560,6 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       }
 
       if (link.error) return link.error
-      if (isLocalWordlistPath(content)) return '不支持读取用户本地路径，请发送 QQ 文件附件或 HTTPS 词库链接。'
 
       if (content?.trim()) {
         return importWordlist(ctx, session, scope, content, clearCache, createImportProgressReporter(session))
@@ -667,11 +662,6 @@ function getWordlistLink(content?: string) {
   } catch {
     return { source: '', error: '词库下载链接格式无效。' }
   }
-}
-
-function isLocalWordlistPath(content?: string) {
-  const value = content?.trim() || ''
-  return /^(?:[a-z]:[\\/]|\\\\|file:\/\/)/i.test(value)
 }
 
 async function getFileSource(session: Session) {
