@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, h, Logger, Session } from 'koishi'
@@ -458,21 +458,31 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
     }
 
     const source = await getFileSource(session)
-    if (!source) {
+    const link = getWordlistLink(session.content)
+    const wordlistSource = source || link.source
+    if (!wordlistSource) {
       if (hasFileElement(session)) {
         logger.warn(`已收到文件但无法读取：群 ${session.guildId}，用户 ${session.userId}`)
-        await session.send('已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或使用“规则 导入本地”导入。')
+        await session.send('已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或改用 HTTPS 下载链接。')
+        return
+      }
+      if (link.error) {
+        await session.send(link.error)
+        return
+      }
+      if (isLocalWordlistPath(session.content)) {
+        await session.send('不支持读取用户本地路径，请发送 QQ 文件附件或 HTTPS 词库链接。')
         return
       }
       logger.info(`待处理词库消息未识别到可下载文件：群 ${session.guildId}，用户 ${session.userId}`)
       return next()
     }
-    logger.info(`识别到待导入词库文件：群 ${session.guildId}，用户 ${session.userId}，分类 ${pending.scope}`)
+    logger.info(`识别到待导入词库${source ? '文件' : 'HTTPS 链接'}：群 ${session.guildId}，用户 ${session.userId}，分类 ${pending.scope}`)
     clearPendingImport(pendingImports, key)
 
     try {
-      await session.send('已收到 TXT 文件，正在下载并读取，请稍候。')
-      const content = await downloadWordlist(ctx, source)
+      await session.send(source ? '已收到 TXT 文件，正在读取，请稍候。' : '已收到 HTTPS 词库链接，正在下载并读取，请稍候。')
+      const content = await downloadWordlist(ctx, wordlistSource)
       const result = await importWordlist(
         ctx,
         session,
@@ -491,7 +501,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
   })
 
   ctx.command('规则', '管理本群红线与敏感规则')
-    .action(() => '用法：规则 添加/批量添加/导入 <红线|敏感>；规则 导入本地 <红线|敏感> <文件名>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
+    .action(() => '用法：规则 添加/批量添加/导入 <红线|敏感>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
 
   ctx.command('规则.添加 <scope:string> <pattern:text>', '添加群治理关键词')
     .action(async ({ session }, scopeInput, pattern) => {
@@ -529,10 +539,12 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       if (!scope) return '规则分类只能是“红线”或“敏感”。'
 
       const source = await getFileSource(session)
-      if (source) {
+      const link = getWordlistLink(content)
+      const wordlistSource = source || link.source
+      if (wordlistSource) {
         try {
-          await session.send('已收到 TXT 文件，正在下载并读取，请稍候。')
-          const fileContent = await downloadWordlist(ctx, source)
+          await session.send(source ? '已收到 TXT 文件，正在读取，请稍候。' : '已收到 HTTPS 词库链接，正在下载并读取，请稍候。')
+          const fileContent = await downloadWordlist(ctx, wordlistSource)
           return importWordlist(
             ctx,
             session,
@@ -548,8 +560,11 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       }
 
       if (hasFileElement(session)) {
-        return '已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或使用“规则 导入本地”导入。'
+        return '已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或改用 HTTPS 下载链接。'
       }
+
+      if (link.error) return link.error
+      if (isLocalWordlistPath(content)) return '不支持读取用户本地路径，请发送 QQ 文件附件或 HTTPS 词库链接。'
 
       if (content?.trim()) {
         return importWordlist(ctx, session, scope, content, clearCache, createImportProgressReporter(session))
@@ -572,35 +587,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       }, 120_000)
       pendingImports.set(importKey, pending)
       logger.info(`创建词库导入等待：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
-      return `请在 120 秒内发送 UTF-8 TXT 词库文件，目标分类：${formatScope(scope)}。`
-    })
-
-  ctx.command('规则.导入本地 <scope:string> <filename:text>', '从本地词库目录导入 TXT')
-    .action(async ({ session }, scopeInput, filename) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
-      if (!session.guildId) return '规则只能在群聊中使用。'
-
-      const scope = parseRuleScope(scopeInput)
-      if (!scope) return '规则分类只能是“红线”或“敏感”。'
-      if (!filename?.trim()) return '请提供本地 TXT 文件名。'
-
-      try {
-        await session.send(`已接收本地词库导入任务：${filename.trim()}，正在读取。`)
-        const localFile = await readLocalWordlist(config, filename)
-        logger.info(`本地词库已读取：群 ${session.guildId || ''}，用户 ${session.userId || ''}，文件 ${localFile.relativePath}，${localFile.bytes} 字节`)
-        return importWordlist(
-          ctx,
-          session,
-          scope,
-          localFile.content,
-          clearCache,
-          createImportProgressReporter(session),
-        )
-      } catch (err) {
-        logger.warn(`本地词库读取失败：群 ${session.guildId || ''}，用户 ${session.userId || ''}，文件 ${filename.trim()}，${err}`)
-        return `本地词库读取失败：${getLocalWordlistError(err)}`
-      }
+      return `请在 120 秒内发送 UTF-8 TXT 文件或 HTTPS 词库链接，目标分类：${formatScope(scope)}。`
     })
 
   ctx.command('规则.删除 <id:number>', '删除群治理规则')
@@ -667,6 +654,26 @@ function getImportKey(session: Session) {
   return session.guildId && session.userId ? `${session.guildId}:${session.userId}` : ''
 }
 
+function getWordlistLink(content?: string) {
+  const value = content?.trim() || ''
+  if (!value || !/^https?:\/\//i.test(value)) return { source: '', error: '' }
+
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:') {
+      return { source: '', error: '词库下载链接必须使用 HTTPS。' }
+    }
+    return { source: url.toString(), error: '' }
+  } catch {
+    return { source: '', error: '词库下载链接格式无效。' }
+  }
+}
+
+function isLocalWordlistPath(content?: string) {
+  const value = content?.trim() || ''
+  return /^(?:[a-z]:[\\/]|\\\\|file:\/\/)/i.test(value)
+}
+
 async function getFileSource(session: Session) {
   const sessionWithElements = session as Session & { elements?: unknown[] }
   const elements = sessionWithElements.elements || h.parse(session.content || '')
@@ -676,17 +683,10 @@ async function getFileSource(session: Session) {
   for (const file of files) {
     const attrs = file.attrs || {}
     const source = [attrs.src, attrs.url, attrs.href]
-      .find((value): value is string => typeof value === 'string' && /^https?:\/\//i.test(value))
+      .find((value): value is string => typeof value === 'string' && /^https:\/\//i.test(value))
     if (source) {
       logger.info(`文件元素已识别：属性 ${Object.keys(attrs).join(',') || '无'}，地址主机 ${getUrlHost(source)}`)
       return source
-    }
-
-    const localSource = [attrs.path, attrs.localPath]
-      .find((value): value is string => typeof value === 'string' && path.isAbsolute(value))
-    if (localSource) {
-      logger.info(`文件元素已识别为本地路径：属性 ${Object.keys(attrs).join(',') || '无'}`)
-      return localSource
     }
 
     const fileId = [attrs.fileId, attrs.file_id]
@@ -762,6 +762,7 @@ async function downloadWordlist(ctx: Context, source: string) {
     return content
   }
 
+  if (!/^https:\/\//i.test(source)) throw new Error('词库下载链接必须使用 HTTPS')
   logger.info(`开始下载词库文件：${getUrlHost(source)}`)
   const content = await ctx.http.get<string>(source, { responseType: 'text' })
   if (typeof content !== 'string') throw new Error('词库响应不是文本')
@@ -785,63 +786,8 @@ function getUrlHost(source: string) {
   }
 }
 
-interface LocalWordlistFile {
-  content: string
-  relativePath: string
-  bytes: number
-}
-
-async function readLocalWordlist(config: FlatConfig, filename: string): Promise<LocalWordlistFile> {
-  const requestedName = filename.trim()
-  if (!requestedName) throw new Error('文件名不能为空')
-  if (path.isAbsolute(requestedName)) throw new Error('只允许使用词库目录内的相对路径')
-  if (path.extname(requestedName).toLowerCase() !== '.txt') throw new Error('只支持 TXT 文件')
-
-  const rootPath = path.resolve(config.localWordlistDirectory || 'wordlists')
-  const rootRealPath = await realpath(rootPath).catch(() => {
-    throw new Error('本地词库目录不存在')
-  })
-  const targetPath = path.resolve(rootPath, requestedName)
-  if (!isPathInside(rootPath, targetPath)) throw new Error('文件路径必须位于本地词库目录内')
-
-  const targetRealPath = await realpath(targetPath).catch(() => {
-    throw new Error('本地词库文件不存在')
-  })
-  if (!isPathInside(rootRealPath, targetRealPath)) throw new Error('文件不能通过符号链接逃逸词库目录')
-
-  const fileStat = await stat(targetRealPath)
-  if (!fileStat.isFile()) throw new Error('目标路径不是文件')
-  if (fileStat.size > WORDLIST_IMPORT_LIMITS.maxBytes) {
-    throw new Error(`文件不能超过 ${formatBytes(WORDLIST_IMPORT_LIMITS.maxBytes)}`)
-  }
-
-  const buffer = await readFile(targetRealPath)
-  let content: string
-  try {
-    content = new TextDecoder('utf-8', { fatal: true }).decode(buffer)
-  } catch {
-    throw new Error('文件必须使用 UTF-8 编码')
-  }
-
-  return {
-    content,
-    relativePath: path.relative(rootRealPath, targetRealPath),
-    bytes: buffer.byteLength,
-  }
-}
-
-function isPathInside(rootPath: string, targetPath: string) {
-  const relativePath = path.relative(rootPath, targetPath)
-  return relativePath && relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)
-}
-
 function formatBytes(bytes: number) {
   return `${Math.round(bytes / 1024 / 1024)} MB`
-}
-
-function getLocalWordlistError(error: unknown) {
-  if (error instanceof Error && error.message) return error.message
-  return '请检查文件路径、编码和权限。'
 }
 
 async function importWordlist(
