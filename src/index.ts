@@ -1,11 +1,23 @@
-import { Context, Schema } from 'koishi'
+import { Context } from 'koishi'
+import { Config, ConfigSchema } from './config'
+import { registerEventHandlers } from './event-handlers'
+import { registerContentModeration } from './content-moderation'
 
 export const name = 'group-assistant'
+export const inject = ['database', 'http']
+export { ConfigSchema as Config }
 
-export interface Config {}
+// 拍平成扁平 config，便于各功能直接访问字段
+function flattenConfig(config: Config) {
+  return {
+    ...config.base,
+    ...config.moderation,
+    ...config.deepseek,
+  }
+}
 
-export const Config: Schema<Config> = Schema.object({})
-
-export function apply(ctx: Context) {
-  // write your plugin here
+export function apply(ctx: Context, config: Config) {
+  const flatConfig = flattenConfig(config)
+  registerEventHandlers(ctx, flatConfig)
+  registerContentModeration(ctx, flatConfig)
 }

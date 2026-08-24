@@ -1,21 +1,30 @@
 {
   "name": "koishi-plugin-group-assistant",
-  "description": "群聊管理",
-  "version": "0.0.1",
+  "description": "面向 Koishi 的群聊准入、内容治理与 AI 审核插件",
+  "version": "1.0.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
+  "scripts": {
+    "build": "node -e \"const fs=require('fs');fs.rmSync('lib',{recursive:true,force:true});fs.rmSync('tsconfig.tsbuildinfo',{force:true})\" && tsc --pretty false && esbuild src/index.ts --bundle --platform=node --format=cjs --external:koishi --outfile=lib/index.js",
+    "typecheck": "tsc --pretty false"
+  },
   "files": [
     "lib",
     "dist"
   ],
   "license": "MIT",
-  "scripts": {},
   "keywords": [
     "chatbot",
     "koishi",
-    "plugin"
+    "plugin",
+    "group-management",
+    "moderation",
+    "deepseek"
   ],
-  "devDependencies": {},
+  "devDependencies": {
+    "esbuild": "^0.23.1",
+    "typescript": "^5.5.4"
+  },
   "peerDependencies": {
     "koishi": "^4.17.11"
   }
