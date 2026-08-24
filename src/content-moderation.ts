@@ -7,6 +7,7 @@ import {
   PunishmentLevelConfig,
 } from './config'
 import { isSimilarText } from './similarity'
+import { normalizeWordlistPattern, parseWordlist } from './wordlist-import'
 
 const logger = new Logger('content-moderation')
 
@@ -424,8 +425,34 @@ function extendTables(ctx: Context) {
 }
 
 function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () => void) {
+  const pendingImports = new Map<string, PendingRuleImport>()
+
+  ctx.middleware(async (session, next) => {
+    const key = getImportKey(session)
+    const pending = key ? pendingImports.get(key) : undefined
+    if (!pending || pending.expiresAt <= Date.now()) {
+      if (pending) pendingImports.delete(key)
+      return next()
+    }
+
+    const source = getFileSource(session)
+    if (!source) return next()
+    pendingImports.delete(key)
+
+    try {
+      const content = await downloadWordlist(ctx, source)
+      const result = await importWordlist(ctx, session, pending.scope, content, clearCache)
+      if (result) await session.send(result)
+      return
+    } catch (err) {
+      logger.warn(`读取词库文件失败: ${err}`)
+      await session.send('词库文件读取失败，请确认发送的是可下载的 UTF-8 文本文件。')
+      return
+    }
+  })
+
   ctx.command('规则', '管理本群红线与敏感规则')
-    .action(() => '用法：规则 添加 <红线|敏感> <关键词>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
+    .action(() => '用法：规则 添加/批量添加/导入 <红线|敏感>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
 
   ctx.command('规则 添加 <scope:string> <pattern:text>', '添加群治理关键词')
     .action(async ({ session }, scopeInput, pattern) => {
@@ -435,6 +462,51 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       const scope = parseRuleScope(scopeInput)
       if (!scope) return '规则分类只能是“红线”或“敏感”。'
       return createRule(ctx, session, scope, pattern || '', clearCache)
+    })
+
+  ctx.command('规则 批量添加 <scope:string> <content:text>', '批量添加群治理关键词')
+    .action(async ({ session }, scopeInput, content) => {
+      if (!session) return
+      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
+
+      const scope = parseRuleScope(scopeInput)
+      if (!scope) return '规则分类只能是“红线”或“敏感”。'
+      if (!content?.trim()) return '请在命令后粘贴一行一个关键词的内容。'
+      return importWordlist(ctx, session, scope, content, clearCache)
+    })
+
+  ctx.command('规则 导入 <scope:string> [content:text]', '导入 TXT 群治理关键词')
+    .action(async ({ session }, scopeInput, content) => {
+      if (!session) return
+      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
+
+      if (scopeInput === '取消') {
+        pendingImports.delete(getImportKey(session))
+        return '已取消待处理的词库导入。'
+      }
+
+      const scope = parseRuleScope(scopeInput)
+      if (!scope) return '规则分类只能是“红线”或“敏感”。'
+
+      const source = getFileSource(session)
+      if (source) {
+        try {
+          const fileContent = await downloadWordlist(ctx, source)
+          return importWordlist(ctx, session, scope, fileContent, clearCache)
+        } catch (err) {
+          logger.warn(`读取词库文件失败: ${err}`)
+          return '词库文件读取失败，请确认发送的是可下载的 UTF-8 文本文件。'
+        }
+      }
+
+      if (content?.trim()) return importWordlist(ctx, session, scope, content, clearCache)
+      if (!session.guildId || !session.userId) return '文件导入只能在群聊中使用。'
+
+      pendingImports.set(getImportKey(session), {
+        scope,
+        expiresAt: Date.now() + 120_000,
+      })
+      return `请在 120 秒内发送 UTF-8 TXT 词库文件，目标分类：${formatScope(scope)}。`
     })
 
   ctx.command('规则 删除 <id:number>', '删除群治理规则')
@@ -468,6 +540,92 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
     })
 }
 
+interface PendingRuleImport {
+  scope: RuleScope
+  expiresAt: number
+}
+
+interface FileElementLike {
+  type?: string
+  attrs?: Record<string, unknown>
+}
+
+function getImportKey(session: Session) {
+  return session.guildId && session.userId ? `${session.guildId}:${session.userId}` : ''
+}
+
+function getFileSource(session: Session) {
+  const sessionWithElements = session as Session & { elements?: unknown[] }
+  const elements = sessionWithElements.elements || h.parse(session.content || '')
+  const files = h.select(elements as never, 'file') as FileElementLike[]
+  for (const file of files) {
+    const attrs = file.attrs || {}
+    const source = [attrs.src, attrs.url, attrs.href]
+      .find((value): value is string => typeof value === 'string' && /^https?:\/\//i.test(value))
+    if (source) return source
+  }
+  return ''
+}
+
+async function downloadWordlist(ctx: Context, source: string) {
+  const content = await ctx.http.get<string>(source, { responseType: 'text' })
+  if (typeof content !== 'string') throw new Error('词库响应不是文本')
+  return content
+}
+
+async function importWordlist(
+  ctx: Context,
+  session: Session,
+  scope: RuleScope,
+  content: string,
+  clearCache: () => void,
+) {
+  if (!session.guildId) return '词库只能导入当前群。'
+
+  const parsed = parseWordlist(content)
+  if (typeof parsed === 'string') return parsed
+  if (!parsed.patterns.length) {
+    return `没有发现可导入的${formatScope(scope)}关键词：读取 ${parsed.readCount} 条，无效 ${parsed.invalidCount} 条。`
+  }
+
+  const existing = await ctx.database.get('group-moderation-rule', {
+    guildId: session.guildId,
+    scope,
+  })
+  const existingPatterns = new Set(existing.map((rule) => normalizeForKeyword(rule.pattern)))
+  const patterns = parsed.patterns.filter((pattern) => {
+    const normalized = normalizeForKeyword(pattern)
+    if (existingPatterns.has(normalized)) return false
+    existingPatterns.add(normalized)
+    return true
+  })
+  const databaseDuplicateCount = parsed.patterns.length - patterns.length
+  let createdCount = 0
+  let failedCount = 0
+  const now = new Date().toISOString()
+
+  for (let index = 0; index < patterns.length; index += 100) {
+    const batch = patterns.slice(index, index + 100)
+    const results = await Promise.allSettled(batch.map((pattern) => {
+      return ctx.database.create('group-moderation-rule', {
+        guildId: session.guildId as string,
+        scope,
+        pattern,
+        enabled: true,
+        createdBy: session.userId || '',
+        createdAt: now,
+      })
+    }))
+    createdCount += results.filter((result) => result.status === 'fulfilled').length
+    failedCount += results.filter((result) => result.status === 'rejected').length
+  }
+
+  if (createdCount) clearCache()
+  const duplicateCount = parsed.duplicateCount + databaseDuplicateCount
+  const failure = failedCount ? `，失败 ${failedCount} 条` : ''
+  return `${formatScope(scope)}词库导入完成：读取 ${parsed.readCount} 条，新增 ${createdCount} 条，重复 ${duplicateCount} 条，无效 ${parsed.invalidCount} 条${failure}。`
+}
+
 async function createRule(
   ctx: Context,
   session: Session,
@@ -483,12 +641,13 @@ async function createRule(
     return '关键词归一化后为空，请输入有效文字。'
   }
 
-  const exists = await ctx.database.get('group-moderation-rule', {
+  const existing = await ctx.database.get('group-moderation-rule', {
     guildId: session.guildId,
     scope,
-    pattern: trimmed,
   })
-  if (exists.length) return `规则已存在：#${exists[0].id}`
+  const normalized = normalizeForKeyword(trimmed)
+  const duplicate = existing.find((rule) => normalizeForKeyword(rule.pattern) === normalized)
+  if (duplicate) return `规则已存在：#${duplicate.id}`
 
   const rule = await ctx.database.create('group-moderation-rule', {
     guildId: session.guildId,
@@ -1296,11 +1455,7 @@ function normalizeUnicode(content: string) {
 }
 
 function normalizeForKeyword(content: string) {
-  let normalized = normalizeUnicode(content).toLowerCase()
-  normalized = replaceConfusables(normalized)
-  normalized = normalized.replace(/\s+/g, '')
-  normalized = normalized.replace(/[\p{P}\p{S}]/gu, '')
-  return collapseRepeats(normalized)
+  return normalizeWordlistPattern(content)
 }
 
 function normalizeForSimilarity(content: string) {
@@ -1308,16 +1463,6 @@ function normalizeForSimilarity(content: string) {
   normalized = normalized.replace(/https?:\/\/\S+/gi, ' url ')
   normalized = normalized.replace(/\d+/g, ' num ')
   return normalizeForKeyword(normalized)
-}
-
-function replaceConfusables(content: string) {
-  return content
-    .replace(/薇信|微\s*信|v\s*x|v\s*信/gi, '微信')
-    .replace(/扣扣|企鹅号/gi, 'qq')
-}
-
-function collapseRepeats(content: string) {
-  return content.replace(/(.)\1{2,}/gu, '$1$1')
 }
 
 function parseRuleScope(value: unknown): RuleScope | null {
