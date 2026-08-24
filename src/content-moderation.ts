@@ -1,5 +1,6 @@
 import { readFile, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context, h, Logger, Session } from 'koishi'
 import {
   Config,
@@ -456,7 +457,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       return next()
     }
 
-    const source = getFileSource(session)
+    const source = await getFileSource(session)
     if (!source) {
       logger.info(`待处理词库消息未识别到可下载文件：群 ${session.guildId}，用户 ${session.userId}`)
       return next()
@@ -522,7 +523,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       const scope = parseRuleScope(scopeInput)
       if (!scope) return '规则分类只能是“红线”或“敏感”。'
 
-      const source = getFileSource(session)
+      const source = await getFileSource(session)
       if (source) {
         try {
           await session.send('已收到 TXT 文件，正在下载并读取，请稍候。')
@@ -657,7 +658,7 @@ function getImportKey(session: Session) {
   return session.guildId && session.userId ? `${session.guildId}:${session.userId}` : ''
 }
 
-function getFileSource(session: Session) {
+async function getFileSource(session: Session) {
   const sessionWithElements = session as Session & { elements?: unknown[] }
   const elements = sessionWithElements.elements || h.parse(session.content || '')
   const files = h.select(elements as never, 'file') as FileElementLike[]
@@ -671,17 +672,94 @@ function getFileSource(session: Session) {
       logger.info(`文件元素已识别：属性 ${Object.keys(attrs).join(',') || '无'}，地址主机 ${getUrlHost(source)}`)
       return source
     }
+
+    const localSource = [attrs.path, attrs.localPath]
+      .find((value): value is string => typeof value === 'string' && path.isAbsolute(value))
+    if (localSource) {
+      logger.info(`文件元素已识别为本地路径：属性 ${Object.keys(attrs).join(',') || '无'}`)
+      return localSource
+    }
+
+    const fileId = [attrs.fileId, attrs.file_id]
+      .find((value): value is string => typeof value === 'string' && Boolean(value))
+    if (fileId) {
+      const source = await resolveOneBotFile(session, fileId)
+      if (source) return source
+    }
   }
-  logger.warn(`检测到文件元素，但没有发现 HTTP(S) 下载地址：属性 ${files.map((file) => Object.keys(file.attrs || {}).join(',') || '无').join('；')}`)
+  logger.warn(`检测到文件元素，但没有发现可读取的文件来源：属性 ${files.map((file) => Object.keys(file.attrs || {}).join(',') || '无').join('；')}`)
+  return ''
+}
+
+interface OneBotFileResponse {
+  retcode?: number
+  data?: Record<string, unknown>
+}
+
+async function resolveOneBotFile(session: Session, fileId: string) {
+  const sessionWithOneBot = session as Session & {
+    onebot?: {
+      _request?: (action: string, params: Record<string, unknown>) => Promise<OneBotFileResponse>
+    }
+    bot: {
+      internal?: {
+        _request?: (action: string, params: Record<string, unknown>) => Promise<OneBotFileResponse>
+      }
+    }
+  }
+  const requestOwner = sessionWithOneBot.onebot?._request
+    ? sessionWithOneBot.onebot
+    : sessionWithOneBot.bot.internal
+  const request = requestOwner?._request
+  if (!request) {
+    logger.warn(`文件包含 fileId，但当前适配器没有 OneBot 请求接口：${fileId}`)
+    return ''
+  }
+
+  try {
+    logger.info(`通过 OneBot get_file 获取文件：${fileId}`)
+    const response = await request.call(requestOwner, 'get_file', { file_id: fileId })
+    const data = response?.data || {}
+    const source = [data.url, data.file, data.path]
+      .find((value): value is string => typeof value === 'string' && Boolean(value))
+    if (source) {
+      logger.info(`OneBot 文件获取成功：${fileId}，来源类型 ${source.startsWith('http') ? 'http' : 'local'}`)
+      return source
+    }
+    logger.warn(`OneBot get_file 未返回可读取路径：${fileId}，retcode ${response?.retcode ?? 'unknown'}`)
+  } catch (err) {
+    logger.warn(`OneBot get_file 调用失败：${fileId}，${err}`)
+  }
   return ''
 }
 
 async function downloadWordlist(ctx: Context, source: string) {
+  if (source.startsWith('file://') || path.isAbsolute(source)) {
+    const localPath = source.startsWith('file://') ? fileURLToPath(source) : source
+    const fileStat = await stat(localPath)
+    if (!fileStat.isFile()) throw new Error('文件来源不是普通文件')
+    if (fileStat.size > WORDLIST_IMPORT_LIMITS.maxBytes) {
+      throw new Error(`文件不能超过 ${formatBytes(WORDLIST_IMPORT_LIMITS.maxBytes)}`)
+    }
+    const buffer = await readFile(localPath)
+    const content = decodeUtf8Wordlist(buffer)
+    logger.info(`本地文件读取完成：${fileStat.size} 字节`)
+    return content
+  }
+
   logger.info(`开始下载词库文件：${getUrlHost(source)}`)
   const content = await ctx.http.get<string>(source, { responseType: 'text' })
   if (typeof content !== 'string') throw new Error('词库响应不是文本')
   logger.info(`词库文件下载完成：${new TextEncoder().encode(content).byteLength} 字节`)
   return content
+}
+
+function decodeUtf8Wordlist(buffer: Uint8Array) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+  } catch {
+    throw new Error('文件必须使用 UTF-8 编码')
+  }
 }
 
 function getUrlHost(source: string) {
