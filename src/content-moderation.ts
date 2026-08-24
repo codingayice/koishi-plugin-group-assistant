@@ -459,6 +459,11 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
 
     const source = await getFileSource(session)
     if (!source) {
+      if (hasFileElement(session)) {
+        logger.warn(`已收到文件但无法读取：群 ${session.guildId}，用户 ${session.userId}`)
+        await session.send('已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或使用“规则 导入本地”导入。')
+        return
+      }
       logger.info(`待处理词库消息未识别到可下载文件：群 ${session.guildId}，用户 ${session.userId}`)
       return next()
     }
@@ -540,6 +545,10 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
           logger.warn(`读取词库文件失败: ${err}`)
           return '词库文件读取失败，请确认发送的是可下载的 UTF-8 文本文件。'
         }
+      }
+
+      if (hasFileElement(session)) {
+        return '已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或使用“规则 导入本地”导入。'
       }
 
       if (content?.trim()) {
@@ -689,6 +698,12 @@ async function getFileSource(session: Session) {
   }
   logger.warn(`检测到文件元素，但没有发现可读取的文件来源：属性 ${files.map((file) => Object.keys(file.attrs || {}).join(',') || '无').join('；')}`)
   return ''
+}
+
+function hasFileElement(session: Session) {
+  const sessionWithElements = session as Session & { elements?: unknown[] }
+  const elements = sessionWithElements.elements || h.parse(session.content || '')
+  return h.select(elements as never, 'file').length > 0
 }
 
 interface OneBotFileResponse {
