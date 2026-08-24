@@ -122,6 +122,13 @@ const moderationSchema = {
     .step(0.01)
     .role('slider')
     .description('自定义模式下，编辑距离相似度阈值'),
+  diceSimilarityThreshold: Schema.number()
+    .default(0.75)
+    .min(0.6)
+    .max(0.95)
+    .step(0.01)
+    .role('slider')
+    .description('自定义模式下，字符 Bigram Dice 相似度阈值'),
   similarMinLength: Schema.number()
     .default(10)
     .min(4)
@@ -166,6 +173,7 @@ export interface Config {
     similarWindowMinutes?: number
     similarMessageCount?: number
     similarityThreshold?: number
+    diceSimilarityThreshold?: number
     similarMinLength?: number
     auditRetentionDays?: number
   }

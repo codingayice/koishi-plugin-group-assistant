@@ -6,6 +6,7 @@ import {
   PunishmentAction,
   PunishmentLevelConfig,
 } from './config'
+import { isSimilarText } from './similarity'
 
 const logger = new Logger('content-moderation')
 
@@ -167,6 +168,7 @@ interface ResolvedPolicy {
   similarWindowMs: number
   similarMessageCount: number
   similarityThreshold: number
+  diceSimilarityThreshold: number
   similarMinLength: number
   offenseWindowMs: number
   punishmentLevels: ResolvedPunishmentLevel[]
@@ -207,6 +209,7 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 5,
     similarityThreshold: 0.90,
+    diceSimilarityThreshold: 0.82,
     similarMinLength: 10,
     offenseWindowMs: 24 * 60 * 60_000,
   },
@@ -216,6 +219,7 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 3,
     similarityThreshold: 0.86,
+    diceSimilarityThreshold: 0.75,
     similarMinLength: 10,
     offenseWindowMs: 24 * 60 * 60_000,
   },
@@ -225,6 +229,7 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 3,
     similarityThreshold: 0.82,
+    diceSimilarityThreshold: 0.70,
     similarMinLength: 8,
     offenseWindowMs: 24 * 60 * 60_000,
   },
@@ -240,6 +245,7 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
         similarWindowMs: clampInteger(config.similarWindowMinutes ?? 60, 10, 1440) * 60_000,
         similarMessageCount: clampInteger(config.similarMessageCount ?? 3, 2, 10),
         similarityThreshold: clampNumber(config.similarityThreshold ?? 0.86, 0.75, 0.95),
+        diceSimilarityThreshold: clampNumber(config.diceSimilarityThreshold ?? 0.75, 0.6, 0.95),
         similarMinLength: clampInteger(config.similarMinLength ?? 10, 4, 50),
         offenseWindowMs: clampInteger(config.offenseWindowHours ?? 24, 1, 168) * 60 * 60_000,
       }
@@ -801,7 +807,7 @@ function detectBehaviorSignals(
       'similar_repeat',
       'behavior',
       '重复发送相似内容',
-      `${minutes} 分钟内达到 ${policy.similarMessageCount} 条相似消息，相似度阈值 ${policy.similarityThreshold}`,
+      `${minutes} 分钟内达到 ${policy.similarMessageCount} 条相似消息，Dice 阈值 ${policy.diceSimilarityThreshold}，编辑距离阈值 ${policy.similarityThreshold}`,
       'delete',
       '相似复读',
     ))
@@ -833,7 +839,10 @@ function updateSimilarRepeatActivity(
   }
 
   const similarCount = item.similarHistory.filter((message) => {
-    return isSimilarByEditDistance(normalized, message.normalized, policy.similarityThreshold)
+    return isSimilarText(normalized, message.normalized, {
+      dice: policy.diceSimilarityThreshold,
+      edit: policy.similarityThreshold,
+    })
   }).length + 1
 
   item.similarHistory.push({ normalized, createdAt: now })
@@ -1309,55 +1318,6 @@ function replaceConfusables(content: string) {
 
 function collapseRepeats(content: string) {
   return content.replace(/(.)\1{2,}/gu, '$1$1')
-}
-
-function isSimilarByEditDistance(left: string, right: string, threshold: number) {
-  if (left === right) return true
-  const leftChars = Array.from(left)
-  const rightChars = Array.from(right)
-  const maxLength = Math.max(leftChars.length, rightChars.length)
-  if (!maxLength) return false
-
-  const maxDistance = Math.floor(maxLength * (1 - threshold))
-  if (Math.abs(leftChars.length - rightChars.length) > maxDistance) return false
-  return boundedLevenshtein(leftChars, rightChars, maxDistance) <= maxDistance
-}
-
-function boundedLevenshtein(leftInput: string[], rightInput: string[], maxDistance: number) {
-  let left = leftInput
-  let right = rightInput
-  if (left.length > right.length) {
-    left = rightInput
-    right = leftInput
-  }
-
-  if (right.length - left.length > maxDistance) return maxDistance + 1
-  let previous = Array(right.length + 1).fill(Number.POSITIVE_INFINITY)
-  let current = Array(right.length + 1).fill(Number.POSITIVE_INFINITY)
-  for (let column = 0; column <= Math.min(right.length, maxDistance); column += 1) {
-    previous[column] = column
-  }
-
-  for (let row = 1; row <= left.length; row += 1) {
-    current.fill(Number.POSITIVE_INFINITY)
-    const from = Math.max(1, row - maxDistance)
-    const to = Math.min(right.length, row + maxDistance)
-    if (from === 1) current[0] = row
-
-    let rowMin = Number.POSITIVE_INFINITY
-    for (let column = from; column <= to; column += 1) {
-      const cost = left[row - 1] === right[column - 1] ? 0 : 1
-      current[column] = Math.min(
-        previous[column] + 1,
-        current[column - 1] + 1,
-        previous[column - 1] + cost,
-      )
-      rowMin = Math.min(rowMin, current[column])
-    }
-    if (rowMin > maxDistance) return maxDistance + 1
-    ;[previous, current] = [current, previous]
-  }
-  return previous[right.length]
 }
 
 function parseRuleScope(value: unknown): RuleScope | null {
