@@ -297,6 +297,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
   const clearCache = () => {
     cache.expiresAt = 0
     cache.index = createEmptyRuleIndex()
+    logger.debug('已清除群治理规则缓存')
   }
 
   const aiQueue = new AiReviewQueue(
@@ -315,15 +316,22 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     void pruneExpiredData(ctx, config, policy).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
   }, 6 * 60 * 60_000)
   ctx.on('dispose', () => aiQueue.dispose())
+  logger.info(`群治理模块已注册：预设 ${config.governancePreset || 'balanced'}，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
   ctx.middleware(async (session, next) => {
     if (config.enabled === false || !session.guildId || !session.content?.trim()) return next()
-    if (isPrivileged(session, config)) return next()
+    if (isPrivileged(session, config)) {
+      logger.debug(`跳过群治理：特权用户，群 ${session.guildId}，用户 ${session.userId || ''}`)
+      return next()
+    }
 
     try {
       const guildId = session.guildId
       const userId = session.userId || ''
-      if (await isUserInAccessList(ctx, guildId, userId, 'whitelist')) return next()
+      if (await isUserInAccessList(ctx, guildId, userId, 'whitelist')) {
+        logger.debug(`跳过群治理：白名单用户，群 ${guildId}，用户 ${userId}`)
+        return next()
+      }
 
       const views = createMessageViews(session.content)
       const signals: ModerationSignal[] = []
@@ -342,27 +350,35 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
       const ruleIndex = await getRuleIndex(ctx, cache)
       signals.push(...findContentSignals(ruleIndex, session.guildId, views))
 
-      if (!signals.length) return next()
+      if (!signals.length) {
+        logger.debug(`消息未命中治理规则：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+        return next()
+      }
 
       const deterministicSignals = signals.filter((signal) => !signal.needsAi)
       const sensitiveSignals = signals.filter((signal) => signal.needsAi)
       const selected = selectHighestPrioritySignal(deterministicSignals)
+      logger.info(`消息命中治理信号：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}，信号 ${formatSignalCodes(signals)}，确定性 ${deterministicSignals.length}，待 AI ${sensitiveSignals.length}`)
 
       if (sensitiveSignals.length && (!selected || getActionRank(selected.action) < getActionRank('delete'))) {
         await scheduleAiReview(ctx, config, aiQueue, session, sensitiveSignals, views.rawText)
       }
 
-      if (!selected) return next()
+      if (!selected) {
+        logger.info(`消息已进入 AI 复核，主流程放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+        return next()
+      }
 
       const offense = await recordOffense(ctx, session.guildId, userId, selected, policy)
       const decision = createDecision(selected, offense.offenseCount, policy)
+      logger.info(`确定性治理裁决：群 ${guildId}，用户 ${userId}，信号 ${selected.code}，动作 ${decision.action}，累计 ${offense.offenseCount} 次${decision.punishmentLevel ? `，处罚级别 ${decision.punishmentLevel.level}` : ''}`)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '')
       await executeAction(session, decision)
 
       if (getActionRank(decision.action) <= getActionRank('warn')) return next()
       return
     } catch (err) {
-      logger.error(`群治理中间件异常: ${err}`)
+      logger.error(`群治理中间件异常：群 ${session.guildId || ''}，用户 ${session.userId || ''}，消息 ${session.messageId || ''}，${err}`)
       return next()
     }
   })
@@ -739,7 +755,7 @@ async function createRule(
     createdAt: new Date().toISOString(),
   })
   clearCache()
-  logger.success(`创建群治理规则 #${rule.id}: ${trimmed}`)
+  logger.info(`创建群治理规则：群 ${session.guildId}，规则 ${rule.id}，分类 ${scope}，词条长度 ${Array.from(trimmed).length}`)
   return `已添加${formatScope(scope)}关键词 #${rule.id}：【${trimmed}】`
 }
 
@@ -751,6 +767,7 @@ async function removeRule(ctx: Context, id: number, session: Session, clearCache
 
   await ctx.database.remove('group-moderation-rule', { id })
   clearCache()
+  logger.info(`删除群治理规则：群 ${session.guildId}，规则 ${id}，分类 ${rule.scope}`)
   return `已删除规则 #${id}：【${rule.pattern}】`
 }
 
@@ -768,6 +785,7 @@ async function setRuleEnabled(
 
   await ctx.database.set('group-moderation-rule', { id }, { enabled })
   clearCache()
+  logger.info(`${enabled ? '启用' : '禁用'}群治理规则：群 ${session.guildId}，规则 ${id}，分类 ${rule.scope}`)
   return `已${enabled ? '启用' : '禁用'}规则 #${id}：【${rule.pattern}】`
 }
 
@@ -793,6 +811,7 @@ function registerAuditCommand(ctx: Context, config: FlatConfig) {
         guildId: session.guildId || '',
       })
       const latest = records.slice(-limit).reverse()
+      logger.info(`查询违规记录：群 ${session.guildId || ''}，返回 ${latest.length} 条`)
       if (!latest.length) return '暂无违规记录。'
 
       return latest.map((record) => {
@@ -819,6 +838,7 @@ function registerOffenseCommand(ctx: Context, config: FlatConfig, policy: Resolv
         .sort((a, b) => b.offenseCount - a.offenseCount || b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, limit)
 
+      logger.info(`查询违规用户：群 ${session.guildId || ''}，返回 ${active.length} 条`)
       if (!active.length) return '暂无有效违规状态。'
       return active.map((item, index) => {
         return `${index + 1}. ${item.userId}：${item.category} ${item.offenseCount} 次，最近命中【${item.lastPattern}】`
@@ -835,6 +855,7 @@ function registerOffenseCommand(ctx: Context, config: FlatConfig, policy: Resolv
         guildId: session.guildId || '',
         userId,
       })
+      logger.info(`清零违规状态：群 ${session.guildId || ''}，用户 ${userId}`)
       return `已清零用户 ${userId} 的违规状态。`
     })
 }
@@ -872,6 +893,7 @@ function registerAccessListCommand(
         createdBy: session.userId || '',
         createdAt: new Date().toISOString(),
       })
+      logger.info(`添加${commandName}：群 ${session.guildId}，用户 ${userId}，记录 ${entry.id}`)
       return `已添加本群${commandName} #${entry.id}：${userId}${reason ? `，原因：${reason}` : ''}`
     })
 
@@ -893,6 +915,7 @@ function registerAccessListCommand(
         userId,
         listType,
       })
+      logger.info(`删除${commandName}：群 ${session.guildId}，用户 ${userId}`)
       return `已删除本群${commandName}用户 ${userId}。`
     })
 
@@ -905,6 +928,7 @@ function registerAccessListCommand(
         guildId: session.guildId || '',
         listType,
       })
+      logger.info(`查询${commandName}：群 ${session.guildId || ''}，返回 ${entries.length} 条`)
       if (!entries.length) return `当前没有${commandName}用户。`
       return entries.map(formatAccessEntry).join('\n')
     })
@@ -928,6 +952,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
       }
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
       await session.send(`${h('at', { id: userId })} 管理员警告：${reason}`)
+      logger.info(`手动警告完成：群 ${session.guildId || ''}，目标用户 ${userId}，累计 ${offense.offenseCount} 次`)
       return `已记录用户 ${userId} 的警告，同类累计 ${offense.offenseCount} 次。`
     })
 
@@ -945,17 +970,22 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
       const decision = createDecision(signal, offense.offenseCount, policy)
       await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
       const result = await executeManualAction(session, userId, decision)
+      logger.info(`手动处罚完成：群 ${session.guildId || ''}，目标用户 ${userId}，动作 ${decision.action}，累计 ${offense.offenseCount} 次`)
       return `已记录用户 ${userId} 的处罚：${decision.action}，同类累计 ${offense.offenseCount} 次。${result ? `\n${result}` : ''}`
     })
 }
 
 async function getRuleIndex(ctx: Context, cache: RuleCache) {
   const now = Date.now()
-  if (cache.expiresAt > now) return cache.index
+  if (cache.expiresAt > now) {
+    logger.debug(`命中规则缓存：剩余 ${cache.expiresAt - now} 毫秒`)
+    return cache.index
+  }
 
   const rules = await ctx.database.get('group-moderation-rule', { enabled: true })
   cache.index = compileRuleIndex(rules)
   cache.expiresAt = now + INTERNAL_POLICY.ruleCacheMs
+  logger.info(`重建群治理规则缓存：启用规则 ${rules.length} 条，覆盖群 ${cache.index.guilds.size} 个`)
   return cache.index
 }
 
@@ -993,6 +1023,9 @@ function findContentSignals(index: CompiledRuleIndex, guildId: string, views: Me
   if (!scoped) return []
 
   const keywordRules = scoped.keywordMatcher.match(views.keywordText)
+  if (keywordRules.length) {
+    logger.info(`关键词匹配成功：群 ${guildId}，规则 ${keywordRules.map((rule) => `${rule.id}/${rule.scope}`).join(',')}`)
+  }
   return keywordRules.slice(0, INTERNAL_POLICY.maxSignalsPerMessage).map(ruleToSignal)
 }
 
@@ -1036,6 +1069,7 @@ function detectBehaviorSignals(
         `${seconds} 秒内连续发送至少 ${policy.burstMessageCount} 条消息`,
         'delete',
       ))
+      logger.info(`触发刷屏检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${item.timestamps.length}`)
     }
   } else {
     item.timestamps = []
@@ -1051,6 +1085,7 @@ function detectBehaviorSignals(
       'delete',
       '相似复读',
     ))
+    logger.info(`触发相似复读检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口 ${minutes} 分钟`)
   }
 
   activity.delete(key)
@@ -1129,7 +1164,7 @@ async function recordOffense(
   const offenseCount = expired ? 1 : existing.offenseCount + 1
 
   if (!existing) {
-    return ctx.database.create('group-moderation-offense', {
+    const created = await ctx.database.create('group-moderation-offense', {
       guildId,
       userId,
       category,
@@ -1140,6 +1175,8 @@ async function recordOffense(
       createdAt: now,
       updatedAt: now,
     })
+    logger.info(`创建违规累计：群 ${guildId}，用户 ${userId}，类别 ${category}，次数 ${offenseCount}`)
+    return created
   }
 
   await ctx.database.set('group-moderation-offense', { id: existing.id }, {
@@ -1149,6 +1186,7 @@ async function recordOffense(
     lastAction: signal.action,
     updatedAt: now,
   })
+  logger.info(`更新违规累计：群 ${guildId}，用户 ${userId}，类别 ${category}，次数 ${offenseCount}${expired ? '，已重新开始窗口' : ''}`)
   return { ...existing, offenseCount, updatedAt: now }
 }
 
@@ -1196,7 +1234,7 @@ async function createAudit(
   targetUserId = session.userId || '',
 ) {
   const now = new Date().toISOString()
-  return ctx.database.create('group-moderation-audit', {
+  const audit = await ctx.database.create('group-moderation-audit', {
     guildId: session.guildId || '',
     channelId: session.channelId || '',
     userId: targetUserId,
@@ -1215,6 +1253,8 @@ async function createAudit(
     createdAt: now,
     updatedAt: now,
   })
+  logger.info(`写入治理审计：审计 ${audit.id}，群 ${audit.guildId}，用户 ${audit.userId}，信号 ${audit.signalCode}，状态 ${audit.status}，动作 ${audit.action}`)
+  return audit
 }
 
 async function scheduleAiReview(
@@ -1240,6 +1280,7 @@ async function scheduleAiReview(
   }
 
   if (!config.aiReviewEnabled || !config.apiKey) {
+    logger.warn(`跳过 AI 复核：${!config.aiReviewEnabled ? '功能未启用' : '未配置 API Key'}，群 ${session.guildId || ''}，消息 ${session.messageId || ''}`)
     await createAudit(ctx, session, decision, 0, 'skipped', false, 'AI 复核未启用或未配置 API Key')
     return
   }
@@ -1247,6 +1288,7 @@ async function scheduleAiReview(
   const audit = await createAudit(ctx, session, decision, 0, 'pending', false, '')
   const key = `${session.guildId}:${session.messageId || `${session.userId}:${Date.now()}`}`
   const result = queue.enqueue({ key, session, auditId: audit.id, signals, content })
+  logger.info(`提交 AI 复核任务：审计 ${audit.id}，结果 ${result}，信号 ${formatSignalCodes(signals)}`)
   if (result !== 'queued') {
     await updateAiAudit(ctx, audit.id, {
       status: result === 'full' ? 'failed' : 'duplicate',
@@ -1264,6 +1306,7 @@ async function processAiReviewJob(
   let lastError: unknown
   for (let attempt = 0; attempt <= INTERNAL_POLICY.aiRetries; attempt += 1) {
     try {
+      logger.info(`开始 AI 复核：审计 ${job.auditId}，第 ${attempt + 1}/${INTERNAL_POLICY.aiRetries + 1} 次，模型 ${config.model || 'deepseek-v4-flash'}`)
       const result = await requestAiReview(ctx, config, job)
       if (!result.violation) {
         await updateAiAudit(ctx, job.auditId, {
@@ -1271,6 +1314,7 @@ async function processAiReviewJob(
           reviewedByAi: true,
           aiReason: result.reason || 'AI 判定为不违规',
         })
+        logger.info(`AI 复核通过：审计 ${job.auditId}，结果不违规，类别 ${result.category}`)
         return
       }
 
@@ -1298,10 +1342,12 @@ async function processAiReviewJob(
         reviewedByAi: true,
         aiReason: result.reason || result.category,
       })
+      logger.info(`AI 确认违规：审计 ${job.auditId}，类别 ${result.category}，动作 ${decision.action}，累计 ${offense.offenseCount} 次`)
       await executeAction(job.session, decision)
       return
     } catch (err) {
       lastError = err
+      logger.warn(`AI 复核请求失败：审计 ${job.auditId}，第 ${attempt + 1} 次，${err}`)
       if (attempt < INTERNAL_POLICY.aiRetries) await delay(250 * (attempt + 1))
     }
   }
@@ -1387,10 +1433,15 @@ async function updateAiAudit(
     ...patch,
     updatedAt: new Date().toISOString(),
   })
+  logger.info(`更新 AI 审计：审计 ${auditId}，状态 ${patch.status || '保持不变'}${patch.action ? `，动作 ${patch.action}` : ''}`)
 }
 
 async function executeAction(session: Session, decision: ModerationDecision) {
-  if (decision.action === 'silent') return
+  if (decision.action === 'silent') {
+    logger.debug(`治理动作仅记录：群 ${session.guildId || ''}，用户 ${session.userId || ''}，信号 ${decision.signal.code}`)
+    return
+  }
+  logger.info(`开始执行治理动作：群 ${session.guildId || ''}，用户 ${session.userId || ''}，动作 ${decision.action}，消息 ${session.messageId || ''}`)
   await sendPunishmentNotice(session, session.userId || '', decision)
   if (decision.action === 'warn') return
 
@@ -1407,6 +1458,7 @@ async function executeManualAction(
   userId: string,
   decision: ModerationDecision,
 ) {
+  logger.info(`开始执行手动治理：群 ${session.guildId || ''}，目标用户 ${userId}，动作 ${decision.action}`)
   await sendPunishmentNotice(session, userId, decision)
   if (decision.action === 'warn') {
     if (!decision.punishmentLevel) {
@@ -1443,47 +1495,61 @@ async function sendPunishmentNotice(
 
 async function deleteMessage(session: Session) {
   const channelId = session.channelId || session.guildId
-  if (!channelId || !session.messageId) return
+  if (!channelId || !session.messageId) {
+    logger.warn(`撤回消息缺少目标信息：群 ${session.guildId || ''}，频道 ${channelId || ''}，消息 ${session.messageId || ''}`)
+    return
+  }
 
   try {
     await session.bot.deleteMessage(channelId, session.messageId)
+    logger.info(`消息撤回成功：频道 ${channelId}，消息 ${session.messageId}`)
   } catch (err) {
-    logger.error(`删除消息失败: ${err}`)
+    logger.error(`删除消息失败：频道 ${channelId}，消息 ${session.messageId}，${err}`)
   }
 }
 
 async function muteMember(session: Session, userId: string, durationMinutes: number) {
-  if (!session.guildId || !userId) return '缺少群 ID 或用户 ID，无法禁言。'
+  if (!session.guildId || !userId) {
+    logger.warn(`禁言缺少目标信息：群 ${session.guildId || ''}，用户 ${userId}`)
+    return '缺少群 ID 或用户 ID，无法禁言。'
+  }
   const bot = session.bot as typeof session.bot & {
     muteGuildMember?: (guildId: string, userId: string, duration: number) => Promise<void>
   }
   if (typeof bot.muteGuildMember !== 'function') {
+    logger.warn(`当前适配器不支持禁言：群 ${session.guildId}，用户 ${userId}`)
     return '当前适配器不支持禁言，已仅记录审计。'
   }
 
   try {
     await bot.muteGuildMember(session.guildId, userId, Math.max(1, durationMinutes) * 60_000)
+    logger.info(`禁言成功：群 ${session.guildId}，用户 ${userId}，时长 ${durationMinutes} 分钟`)
     return `已尝试禁言用户 ${userId} ${durationMinutes} 分钟。`
   } catch (err) {
-    logger.error(`禁言用户失败: ${err}`)
+    logger.error(`禁言用户失败：群 ${session.guildId}，用户 ${userId}，${err}`)
     return `禁言用户 ${userId} 失败，已保留审计记录。`
   }
 }
 
 async function kickMember(session: Session, userId: string) {
-  if (!session.guildId || !userId) return '缺少群 ID 或用户 ID，无法踢出。'
+  if (!session.guildId || !userId) {
+    logger.warn(`踢出缺少目标信息：群 ${session.guildId || ''}，用户 ${userId}`)
+    return '缺少群 ID 或用户 ID，无法踢出。'
+  }
   const bot = session.bot as typeof session.bot & {
     kickGuildMember?: (guildId: string, userId: string) => Promise<void>
   }
   if (typeof bot.kickGuildMember !== 'function') {
+    logger.warn(`当前适配器不支持踢出：群 ${session.guildId}，用户 ${userId}`)
     return '当前适配器不支持踢出，已仅记录审计。'
   }
 
   try {
     await bot.kickGuildMember(session.guildId, userId)
+    logger.info(`踢出成功：群 ${session.guildId}，用户 ${userId}`)
     return `已尝试踢出用户 ${userId}。`
   } catch (err) {
-    logger.error(`踢出用户失败: ${err}`)
+    logger.error(`踢出用户失败：群 ${session.guildId}，用户 ${userId}，${err}`)
     return `踢出用户 ${userId} 失败，已保留审计记录。`
   }
 }
@@ -1582,6 +1648,10 @@ function createSignal(
   }
 }
 
+function formatSignalCodes(signals: ModerationSignal[]) {
+  return signals.map((signal) => signal.code).join(',') || 'none'
+}
+
 function getOffenseCategory(signal: ModerationSignal) {
   if (signal.source === 'content') return '内容违规'
   if (signal.source === 'behavior') return '行为违规'
@@ -1675,6 +1745,11 @@ async function pruneExpiredData(ctx: Context, config: FlatConfig, policy: Resolv
   for (const id of expiredOffenseIds) {
     await ctx.database.remove('group-moderation-offense', { id })
   }
+  if (expiredAuditIds.length || expiredOffenseIds.length) {
+    logger.info(`清理过期治理数据：审计 ${expiredAuditIds.length} 条，违规状态 ${expiredOffenseIds.length} 条`)
+  } else {
+    logger.debug('清理过期治理数据：没有需要删除的记录')
+  }
 }
 
 class AiReviewQueue {
@@ -1694,17 +1769,25 @@ class AiReviewQueue {
     for (const [key, expiresAt] of this.seen) {
       if (expiresAt <= now) this.seen.delete(key)
     }
-    if (this.seen.has(job.key)) return 'duplicate'
-    if (this.disposed || this.pending.length + this.active >= this.limit) return 'full'
+    if (this.seen.has(job.key)) {
+      logger.warn(`AI 复核任务重复：审计 ${job.auditId}`)
+      return 'duplicate'
+    }
+    if (this.disposed || this.pending.length + this.active >= this.limit) {
+      logger.warn(`AI 复核队列已满或已销毁：审计 ${job.auditId}，排队 ${this.pending.length}，执行中 ${this.active}`)
+      return 'full'
+    }
 
     this.seen.set(job.key, now + INTERNAL_POLICY.aiIdempotencyMs)
     this.pending.push(job)
+    logger.debug(`AI 复核任务入队：审计 ${job.auditId}，排队 ${this.pending.length}，执行中 ${this.active}`)
     this.pump()
     return 'queued'
   }
 
   dispose() {
     this.disposed = true
+    logger.info(`销毁 AI 复核队列：丢弃 ${this.pending.length} 个待处理任务，执行中 ${this.active} 个`)
     this.pending = []
   }
 
@@ -1716,6 +1799,7 @@ class AiReviewQueue {
         .catch((err) => logger.error(`AI 复核队列任务异常: ${err}`))
         .finally(() => {
           this.active -= 1
+          logger.debug(`AI 复核任务结束：审计 ${job.auditId}，排队 ${this.pending.length}，执行中 ${this.active}`)
           this.pump()
         })
     }
