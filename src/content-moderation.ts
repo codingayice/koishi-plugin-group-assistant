@@ -448,7 +448,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
     const pending = key ? pendingImports.get(key) : undefined
     if (!pending || pending.expiresAt <= Date.now()) {
       if (pending) {
-        pendingImports.delete(key)
+        clearPendingImport(pendingImports, key)
         logger.info(`词库导入等待已过期：群 ${session.guildId}，用户 ${session.userId}`)
       }
       return next()
@@ -460,7 +460,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       return next()
     }
     logger.info(`识别到待导入词库文件：群 ${session.guildId}，用户 ${session.userId}，分类 ${pending.scope}`)
-    pendingImports.delete(key)
+    clearPendingImport(pendingImports, key)
 
     try {
       await session.send('已收到 TXT 文件，正在下载并读取，请稍候。')
@@ -512,7 +512,8 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
 
       if (scopeInput === '取消') {
-        pendingImports.delete(getImportKey(session))
+        const cancelled = clearPendingImport(pendingImports, getImportKey(session))
+        logger.info(`手动取消词库导入等待：群 ${session.guildId || ''}，用户 ${session.userId || ''}，结果 ${cancelled ? '已取消' : '不存在待处理任务'}`)
         return '已取消待处理的词库导入。'
       }
 
@@ -543,10 +544,21 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       }
       if (!session.guildId || !session.userId) return '文件导入只能在群聊中使用。'
 
-      pendingImports.set(getImportKey(session), {
+      const importKey = getImportKey(session)
+      clearPendingImport(pendingImports, importKey)
+      const pending: PendingRuleImport = {
         scope,
         expiresAt: Date.now() + 120_000,
-      })
+      }
+      pending.timer = setTimeout(() => {
+        if (pendingImports.get(importKey) !== pending) return
+        pendingImports.delete(importKey)
+        logger.info(`词库导入等待超时：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
+        void session.send('词库导入等待已超时，请重新发送“规则 导入 红线”或“规则 导入 敏感”。').catch((err) => {
+          logger.warn(`发送词库导入超时提示失败：${err}`)
+        })
+      }, 120_000)
+      pendingImports.set(importKey, pending)
       logger.info(`创建词库导入等待：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
       return `请在 120 秒内发送 UTF-8 TXT 词库文件，目标分类：${formatScope(scope)}。`
     })
@@ -580,11 +592,19 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       if (scopeInput && !scope) return '规则分类只能是“红线”或“敏感”。'
       return showRules(ctx, session, scope)
     })
+
+  ctx.on('dispose', () => {
+    for (const pending of pendingImports.values()) {
+      if (pending.timer) clearTimeout(pending.timer)
+    }
+    pendingImports.clear()
+  })
 }
 
 interface PendingRuleImport {
   scope: RuleScope
   expiresAt: number
+  timer?: ReturnType<typeof setTimeout>
 }
 
 interface FileElementLike {
@@ -593,6 +613,15 @@ interface FileElementLike {
 }
 
 type ImportProgressReporter = (message: string) => Promise<void>
+
+function clearPendingImport(pendingImports: Map<string, PendingRuleImport>, key: string) {
+  if (!key) return false
+  const pending = pendingImports.get(key)
+  if (!pending) return false
+  if (pending.timer) clearTimeout(pending.timer)
+  pendingImports.delete(key)
+  return true
+}
 
 function getImportKey(session: Session) {
   return session.guildId && session.userId ? `${session.guildId}:${session.userId}` : ''
