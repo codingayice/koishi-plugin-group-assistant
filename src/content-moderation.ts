@@ -431,12 +431,19 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
     const key = getImportKey(session)
     const pending = key ? pendingImports.get(key) : undefined
     if (!pending || pending.expiresAt <= Date.now()) {
-      if (pending) pendingImports.delete(key)
+      if (pending) {
+        pendingImports.delete(key)
+        logger.info(`词库导入等待已过期：群 ${session.guildId}，用户 ${session.userId}`)
+      }
       return next()
     }
 
     const source = getFileSource(session)
-    if (!source) return next()
+    if (!source) {
+      logger.info(`待处理词库消息未识别到可下载文件：群 ${session.guildId}，用户 ${session.userId}`)
+      return next()
+    }
+    logger.info(`识别到待导入词库文件：群 ${session.guildId}，用户 ${session.userId}，分类 ${pending.scope}`)
     pendingImports.delete(key)
 
     try {
@@ -524,6 +531,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
         scope,
         expiresAt: Date.now() + 120_000,
       })
+      logger.info(`创建词库导入等待：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
       return `请在 120 秒内发送 UTF-8 TXT 词库文件，目标分类：${formatScope(scope)}。`
     })
 
@@ -578,19 +586,35 @@ function getFileSource(session: Session) {
   const sessionWithElements = session as Session & { elements?: unknown[] }
   const elements = sessionWithElements.elements || h.parse(session.content || '')
   const files = h.select(elements as never, 'file') as FileElementLike[]
+  if (!files.length) return ''
+
   for (const file of files) {
     const attrs = file.attrs || {}
     const source = [attrs.src, attrs.url, attrs.href]
       .find((value): value is string => typeof value === 'string' && /^https?:\/\//i.test(value))
-    if (source) return source
+    if (source) {
+      logger.info(`文件元素已识别：属性 ${Object.keys(attrs).join(',') || '无'}，地址主机 ${getUrlHost(source)}`)
+      return source
+    }
   }
+  logger.warn(`检测到文件元素，但没有发现 HTTP(S) 下载地址：属性 ${files.map((file) => Object.keys(file.attrs || {}).join(',') || '无').join('；')}`)
   return ''
 }
 
 async function downloadWordlist(ctx: Context, source: string) {
+  logger.info(`开始下载词库文件：${getUrlHost(source)}`)
   const content = await ctx.http.get<string>(source, { responseType: 'text' })
   if (typeof content !== 'string') throw new Error('词库响应不是文本')
+  logger.info(`词库文件下载完成：${new TextEncoder().encode(content).byteLength} 字节`)
   return content
+}
+
+function getUrlHost(source: string) {
+  try {
+    return new URL(source).host
+  } catch {
+    return 'unknown'
+  }
 }
 
 async function importWordlist(
@@ -603,9 +627,15 @@ async function importWordlist(
 ) {
   if (!session.guildId) return '词库只能导入当前群。'
 
+  logger.info(`开始导入词库：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
+
   const parsed = parseWordlist(content)
-  if (typeof parsed === 'string') return parsed
+  if (typeof parsed === 'string') {
+    logger.warn(`词库解析失败：${parsed}`)
+    return parsed
+  }
   if (!parsed.patterns.length) {
+    logger.warn(`词库没有可导入关键词：读取 ${parsed.readCount} 条，无效 ${parsed.invalidCount} 条`)
     return `没有发现可导入的${formatScope(scope)}关键词：读取 ${parsed.readCount} 条，无效 ${parsed.invalidCount} 条。`
   }
 
@@ -660,6 +690,7 @@ async function importWordlist(
   if (createdCount) clearCache()
   const duplicateCount = parsed.duplicateCount + databaseDuplicateCount
   const failure = failedCount ? `，失败 ${failedCount} 条` : ''
+  logger.info(`词库导入完成：群 ${session.guildId}，分类 ${scope}，新增 ${createdCount} 条，重复 ${duplicateCount} 条，无效 ${parsed.invalidCount} 条，失败 ${failedCount} 条`)
   return `${formatScope(scope)}词库导入完成：读取 ${parsed.readCount} 条，新增 ${createdCount} 条，重复 ${duplicateCount} 条，无效 ${parsed.invalidCount} 条${failure}。`
 }
 
