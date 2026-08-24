@@ -138,6 +138,9 @@ const moderationSchema = {
     .default(30)
     .min(1)
     .description('治理审计记录保留天数'),
+  localWordlistDirectory: Schema.string()
+    .default('wordlists')
+    .description('本地词库目录；本地导入命令只允许读取该目录内的 TXT 文件'),
 }
 
 const deepseekSchema = {
@@ -176,6 +179,7 @@ export interface Config {
     diceSimilarityThreshold?: number
     similarMinLength?: number
     auditRetentionDays?: number
+    localWordlistDirectory?: string
   }
   deepseek: {
     aiReviewEnabled?: boolean

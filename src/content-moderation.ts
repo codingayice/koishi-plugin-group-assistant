@@ -1,3 +1,5 @@
+import { readFile, realpath, stat } from 'node:fs/promises'
+import path from 'node:path'
 import { Context, h, Logger, Session } from 'koishi'
 import {
   Config,
@@ -7,7 +9,7 @@ import {
   PunishmentLevelConfig,
 } from './config'
 import { isSimilarText } from './similarity'
-import { normalizeWordlistPattern, parseWordlist } from './wordlist-import'
+import { normalizeWordlistPattern, parseWordlist, WORDLIST_IMPORT_LIMITS } from './wordlist-import'
 
 const logger = new Logger('content-moderation')
 
@@ -483,7 +485,7 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
   })
 
   ctx.command('规则', '管理本群红线与敏感规则')
-    .action(() => '用法：规则 添加/批量添加/导入 <红线|敏感>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
+    .action(() => '用法：规则 添加/批量添加/导入 <红线|敏感>；规则 导入本地 <红线|敏感> <文件名>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
 
   ctx.command('规则.添加 <scope:string> <pattern:text>', '添加群治理关键词')
     .action(async ({ session }, scopeInput, pattern) => {
@@ -561,6 +563,34 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       pendingImports.set(importKey, pending)
       logger.info(`创建词库导入等待：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
       return `请在 120 秒内发送 UTF-8 TXT 词库文件，目标分类：${formatScope(scope)}。`
+    })
+
+  ctx.command('规则.导入本地 <scope:string> <filename:text>', '从本地词库目录导入 TXT')
+    .action(async ({ session }, scopeInput, filename) => {
+      if (!session) return
+      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
+      if (!session.guildId) return '规则只能在群聊中使用。'
+
+      const scope = parseRuleScope(scopeInput)
+      if (!scope) return '规则分类只能是“红线”或“敏感”。'
+      if (!filename?.trim()) return '请提供本地 TXT 文件名。'
+
+      try {
+        await session.send(`已接收本地词库导入任务：${filename.trim()}，正在读取。`)
+        const localFile = await readLocalWordlist(config, filename)
+        logger.info(`本地词库已读取：群 ${session.guildId || ''}，用户 ${session.userId || ''}，文件 ${localFile.relativePath}，${localFile.bytes} 字节`)
+        return importWordlist(
+          ctx,
+          session,
+          scope,
+          localFile.content,
+          clearCache,
+          createImportProgressReporter(session),
+        )
+      } catch (err) {
+        logger.warn(`本地词库读取失败：群 ${session.guildId || ''}，用户 ${session.userId || ''}，文件 ${filename.trim()}，${err}`)
+        return `本地词库读取失败：${getLocalWordlistError(err)}`
+      }
     })
 
   ctx.command('规则.删除 <id:number>', '删除群治理规则')
@@ -660,6 +690,65 @@ function getUrlHost(source: string) {
   } catch {
     return 'unknown'
   }
+}
+
+interface LocalWordlistFile {
+  content: string
+  relativePath: string
+  bytes: number
+}
+
+async function readLocalWordlist(config: FlatConfig, filename: string): Promise<LocalWordlistFile> {
+  const requestedName = filename.trim()
+  if (!requestedName) throw new Error('文件名不能为空')
+  if (path.isAbsolute(requestedName)) throw new Error('只允许使用词库目录内的相对路径')
+  if (path.extname(requestedName).toLowerCase() !== '.txt') throw new Error('只支持 TXT 文件')
+
+  const rootPath = path.resolve(config.localWordlistDirectory || 'wordlists')
+  const rootRealPath = await realpath(rootPath).catch(() => {
+    throw new Error('本地词库目录不存在')
+  })
+  const targetPath = path.resolve(rootPath, requestedName)
+  if (!isPathInside(rootPath, targetPath)) throw new Error('文件路径必须位于本地词库目录内')
+
+  const targetRealPath = await realpath(targetPath).catch(() => {
+    throw new Error('本地词库文件不存在')
+  })
+  if (!isPathInside(rootRealPath, targetRealPath)) throw new Error('文件不能通过符号链接逃逸词库目录')
+
+  const fileStat = await stat(targetRealPath)
+  if (!fileStat.isFile()) throw new Error('目标路径不是文件')
+  if (fileStat.size > WORDLIST_IMPORT_LIMITS.maxBytes) {
+    throw new Error(`文件不能超过 ${formatBytes(WORDLIST_IMPORT_LIMITS.maxBytes)}`)
+  }
+
+  const buffer = await readFile(targetRealPath)
+  let content: string
+  try {
+    content = new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+  } catch {
+    throw new Error('文件必须使用 UTF-8 编码')
+  }
+
+  return {
+    content,
+    relativePath: path.relative(rootRealPath, targetRealPath),
+    bytes: buffer.byteLength,
+  }
+}
+
+function isPathInside(rootPath: string, targetPath: string) {
+  const relativePath = path.relative(rootPath, targetPath)
+  return relativePath && relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)
+}
+
+function formatBytes(bytes: number) {
+  return `${Math.round(bytes / 1024 / 1024)} MB`
+}
+
+function getLocalWordlistError(error: unknown) {
+  if (error instanceof Error && error.message) return error.message
+  return '请检查文件路径、编码和权限。'
 }
 
 async function importWordlist(
