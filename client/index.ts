@@ -39,6 +39,8 @@ const WordlistPage = defineComponent({
   setup() {
     const guildId = ref('')
     const scope = ref<RuleScope>('sensitive')
+    const groups = ref<GroupRecord[]>([])
+    const groupsLoading = ref(false)
     const rules = ref<RuleRecord[]>([])
     const ruleSearch = ref('')
     const rulePattern = ref('')
@@ -91,20 +93,45 @@ const WordlistPage = defineComponent({
       }
     }
 
-    const loadInitialGroup = async () => {
+    const loadGroups = async () => {
+      groupsLoading.value = true
       try {
         const result = await send('group-assistant/list-groups')
-        const groups = Array.isArray(result) ? result as GroupRecord[] : []
-        if (groups[0]?.guildId) {
-          guildId.value = groups[0].guildId
+        const records = Array.isArray(result) ? result as GroupRecord[] : []
+        if (guildId.value && !records.some((group) => group.guildId === guildId.value)) {
+          records.unshift({ guildId: guildId.value })
+        }
+        groups.value = records
+        if (!guildId.value && records[0]?.guildId) {
+          guildId.value = records[0].guildId
           await loadRules()
         }
       } catch (error) {
         rulesStatus.value = `群列表读取失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        groupsLoading.value = false
       }
     }
 
-    void loadInitialGroup()
+    const selectGroup = (group: GroupRecord) => {
+      if (guildId.value === group.guildId) return
+      guildId.value = group.guildId
+      ruleSearch.value = ''
+      editingRuleId.value = undefined
+      editingPattern.value = ''
+      void loadRules()
+    }
+
+    const addGroup = () => {
+      const targetGuildId = window.prompt('请输入群号：')?.trim()
+      if (!targetGuildId) return
+      if (!groups.value.some((group) => group.guildId === targetGuildId)) {
+        groups.value = [...groups.value, { guildId: targetGuildId }]
+      }
+      selectGroup({ guildId: targetGuildId })
+    }
+
+    void loadGroups()
 
     const switchScope = (nextScope: RuleScope) => {
       if (scope.value === nextScope) return
@@ -136,6 +163,7 @@ const WordlistPage = defineComponent({
         })
         rulePattern.value = ''
         await loadRules()
+        await loadGroups()
       } catch (error) {
         rulesStatus.value = `添加失败：${error instanceof Error ? error.message : String(error)}`
       } finally {
@@ -190,6 +218,7 @@ const WordlistPage = defineComponent({
           enabled: !rule.enabled,
         })
         await loadRules()
+        await loadGroups()
       } catch (error) {
         rulesStatus.value = `操作失败：${error instanceof Error ? error.message : String(error)}`
       } finally {
@@ -207,6 +236,7 @@ const WordlistPage = defineComponent({
           id: rule.id,
         })
         await loadRules()
+        await loadGroups()
       } catch (error) {
         rulesStatus.value = `删除失败：${error instanceof Error ? error.message : String(error)}`
       } finally {
@@ -277,6 +307,7 @@ const WordlistPage = defineComponent({
         selectedFile.value = undefined
         showImport.value = false
         await loadRules()
+        await loadGroups()
       } catch (error) {
         status.value = `导入失败：${error instanceof Error ? error.message : String(error)}`
         statusTone.value = 'error'
@@ -310,6 +341,27 @@ const WordlistPage = defineComponent({
     }
 
     return () => h('main', { class: 'wordlist-page' }, [
+      h('aside', { class: 'group-sidebar' }, [
+        h('header', { class: 'group-sidebar-header' }, [
+          h('span', '群聊'),
+          h('button', {
+            class: 'group-add-button',
+            type: 'button',
+            title: '添加群聊',
+            onClick: addGroup,
+          }, '+'),
+        ]),
+        h('div', { class: 'group-list' }, groupsLoading.value
+          ? [h('div', { class: 'group-list-empty' }, '加载中...')]
+          : groups.value.length
+            ? groups.value.map((group) => h('button', {
+              class: ['group-item', { active: guildId.value === group.guildId }],
+              type: 'button',
+              onClick: () => selectGroup(group),
+            }, group.guildId))
+            : [h('div', { class: 'group-list-empty' }, '暂无群聊')]),
+      ]),
+      h('div', { class: 'page-main' }, [
       h('header', { class: 'page-heading' }, [
         h('div', [
           h('h1', '群治理词库'),
@@ -323,23 +375,12 @@ const WordlistPage = defineComponent({
         }, '导入词库'),
       ]),
       h('section', { class: 'control-bar' }, [
-        h('label', { class: 'group-field' }, [
-          h('span', '群号'),
-          h('input', {
-            class: 'console-input group-input',
-            value: guildId.value,
-            placeholder: '例如 1047767828',
-            disabled: rulesLoading.value,
-            onInput: (event: Event) => { guildId.value = (event.target as HTMLInputElement).value },
-            onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void loadRules() },
-          }),
-        ]),
         h('button', {
           class: 'console-button primary',
           type: 'button',
           disabled: rulesLoading.value,
           onClick: () => void loadRules(),
-        }, rulesLoading.value ? '加载中...' : '加载'),
+        }, rulesLoading.value ? '刷新中...' : '刷新'),
         h('input', {
           class: 'console-input search-input',
           value: ruleSearch.value,
@@ -443,6 +484,7 @@ const WordlistPage = defineComponent({
             }, busy.value ? '导入中...' : '开始导入'),
           ]),
         ])]) : null,
+      ]),
     ])
   },
 })
