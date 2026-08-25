@@ -303,6 +303,8 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     logger.debug('已清除群治理规则缓存')
   }
 
+  registerConsoleWordlistImport(ctx, clearCache)
+
   const aiQueue = new AiReviewQueue(
     (job) => processAiReviewJob(ctx, config, policy, job),
     INTERNAL_POLICY.aiQueueConcurrency,
@@ -634,6 +636,77 @@ interface FileElementLike {
   attrs?: Record<string, unknown>
 }
 
+interface RuleImportTarget {
+  guildId?: string
+  userId?: string
+}
+
+interface ConsoleServiceLike {
+  addEntry(files: string | string[] | { dev: string; prod: string | string[] }): unknown
+  addListener(event: string, callback: (...args: any[]) => unknown, options?: { authority?: number }): unknown
+}
+
+interface ConsoleImportPayload {
+  guildId?: unknown
+  scope?: unknown
+  filename?: unknown
+  content?: unknown
+  jobId?: unknown
+}
+
+interface ConsoleClientLike {
+  id: string
+  send(payload: unknown): void
+}
+
+function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
+  ctx.inject(['console'], (consoleContext) => {
+    const console = (consoleContext as Context & { console: ConsoleServiceLike }).console
+    console.addEntry({
+      dev: path.resolve(__dirname, '../client/index.ts'),
+      prod: path.resolve(__dirname, '../dist'),
+    })
+    console.addListener('group-assistant/import-wordlist', async function (this: ConsoleClientLike, payload: ConsoleImportPayload) {
+      const guildId = typeof payload?.guildId === 'string' ? payload.guildId.trim() : ''
+      const scope = payload?.scope === 'redline' || payload?.scope === 'sensitive' ? payload.scope : ''
+      const content = typeof payload?.content === 'string' ? payload.content : ''
+      const filename = typeof payload?.filename === 'string' ? payload.filename.trim() : 'console-upload.txt'
+      const jobId = typeof payload?.jobId === 'string' ? payload.jobId : ''
+      if (!guildId) throw new Error('请提供目标群号。')
+      if (!scope) throw new Error('词库分类只能是红线或敏感。')
+      if (!content) throw new Error('请选择要导入的 TXT 文件。')
+
+      let wordlist: string
+      try {
+        const buffer = Buffer.from(content, 'base64')
+        if (buffer.byteLength > WORDLIST_IMPORT_LIMITS.maxBytes) {
+          throw new Error(`文件不能超过 ${formatBytes(WORDLIST_IMPORT_LIMITS.maxBytes)}`)
+        }
+        wordlist = decodeUtf8Wordlist(buffer)
+      } catch (err) {
+        logger.warn(`Console 词库文件解码失败：群 ${guildId}，文件 ${filename}，${err}`)
+        throw err
+      }
+
+      const reportProgress: ImportProgressReporter = async (message) => {
+        this.send({
+          type: 'group-assistant/import-progress',
+          body: { jobId, message },
+        })
+      }
+      logger.info(`收到 Console 词库导入：群 ${guildId}，分类 ${scope}，文件 ${filename}`)
+      return importWordlist(
+        ctx,
+        { guildId, userId: `console:${this.id}` },
+        scope,
+        wordlist,
+        clearCache,
+        reportProgress,
+      )
+    }, { authority: 4 })
+  })
+}
+
 type ImportProgressReporter = (message: string) => Promise<void>
 
 function clearPendingImport(pendingImports: Map<string, PendingRuleImport>, key: string) {
@@ -782,7 +855,7 @@ function formatBytes(bytes: number) {
 
 async function importWordlist(
   ctx: Context,
-  session: Session,
+  session: RuleImportTarget,
   scope: RuleScope,
   content: string,
   clearCache: () => void,
