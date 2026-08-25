@@ -301,7 +301,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     logger.debug('已清除群治理规则缓存')
   }
 
-  registerConsoleWordlistImport(ctx, clearCache)
+  registerConsoleWordlistImport(ctx, clearCache, policy)
 
   const aiQueue = new AiReviewQueue(
     (job) => processAiReviewJob(ctx, config, policy, job),
@@ -469,6 +469,11 @@ interface ConsoleRulePayload {
   page?: unknown
   pageSize?: unknown
   search?: unknown
+  userId?: unknown
+  signalCode?: unknown
+  status?: unknown
+  from?: unknown
+  to?: unknown
 }
 
 interface ConsoleRuleRecord {
@@ -487,12 +492,46 @@ interface ConsoleGroupRecord {
   enabledCount: number
 }
 
+interface ConsoleAuditRecord {
+  id: number
+  guildId: string
+  channelId: string
+  userId: string
+  messageId: string
+  ruleId: number
+  signalCode: string
+  source: string
+  pattern: string
+  evidence: string
+  action: ModerationAction
+  status: string
+  offenseCount: number
+  reviewedByAi: boolean
+  aiReason: string
+  content: string
+  createdAt: string
+  updatedAt: string
+}
+
+interface ConsoleOffenseRecord {
+  id: number
+  guildId: string
+  userId: string
+  category: string
+  offenseCount: number
+  lastSignalCode: string
+  lastPattern: string
+  lastAction: ModerationAction
+  createdAt: string
+  updatedAt: string
+}
+
 interface ConsoleClientLike {
   id: string
   send(payload: unknown): void
 }
 
-function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
+function registerConsoleWordlistImport(ctx: Context, clearCache: () => void, policy: ResolvedPolicy) {
   ctx.inject(['console'], (consoleContext) => {
     const console = (consoleContext as Context & { console: ConsoleServiceLike }).console
     console.addEntry({
@@ -613,6 +652,74 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
       logger.info(`Console 删除群词库：群 ${target.guildId}，删除 ${rules.length} 条规则`)
       return `已删除群 ${target.guildId} 的 ${rules.length} 条词库规则。`
     }, { authority: 4 })
+
+    console.addListener('group-assistant/list-audits', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const { page, pageSize } = parseConsolePagination(payload)
+      const query: Query<ModerationAudit> = { guildId: target.guildId }
+      const userId = typeof payload?.userId === 'string' ? payload.userId.trim() : ''
+      const signalCode = typeof payload?.signalCode === 'string' ? payload.signalCode.trim() : ''
+      const status = typeof payload?.status === 'string' ? payload.status.trim() : ''
+      const search = typeof payload?.search === 'string' ? payload.search.trim() : ''
+      const from = typeof payload?.from === 'string' ? payload.from.trim() : ''
+      const to = typeof payload?.to === 'string' ? payload.to.trim() : ''
+      if (userId) query.userId = userId
+      if (signalCode) query.signalCode = signalCode
+      if (status) query.status = status
+      if (search) query.pattern = { $regexFor: { input: escapeRegExp(search), flags: 'i' } }
+      if (from || to) query.createdAt = {
+        ...(from ? { $gte: from } : {}),
+        ...(to ? { $lt: to } : {}),
+      }
+      const [total, audits] = await Promise.all([
+        ctx.database.eval('group-moderation-audit', row => $.count(row.id), query),
+        ctx.database.get('group-moderation-audit', query, {
+          offset: (page - 1) * pageSize,
+          limit: pageSize,
+          sort: { createdAt: 'desc' },
+        }),
+      ])
+      return {
+        items: audits.map(toConsoleAuditRecord),
+        total: Number(total) || 0,
+        page,
+        pageSize,
+      }
+    }, { authority: 4 })
+
+    console.addListener('group-assistant/list-offenses', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const { page, pageSize } = parseConsolePagination(payload)
+      const cutoff = new Date(Date.now() - policy.offenseWindowMs).toISOString()
+      const query: Query<ModerationOffense> = {
+        guildId: target.guildId,
+        updatedAt: { $gte: cutoff },
+      }
+      const userId = typeof payload?.userId === 'string' ? payload.userId.trim() : ''
+      if (userId) query.userId = userId
+      const [total, offenses] = await Promise.all([
+        ctx.database.eval('group-moderation-offense', row => $.count(row.id), query),
+        ctx.database.get('group-moderation-offense', query, {
+          offset: (page - 1) * pageSize,
+          limit: pageSize,
+          sort: { offenseCount: 'desc', updatedAt: 'desc' },
+        }),
+      ])
+      return {
+        items: offenses.map(toConsoleOffenseRecord),
+        total: Number(total) || 0,
+        page,
+        pageSize,
+        cutoff,
+      }
+    }, { authority: 4 })
+
+    console.addListener('group-assistant/clear-offense', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const userId = typeof payload?.userId === 'string' ? payload.userId.trim() : ''
+      if (!userId) throw new Error('请提供要清零的用户 ID。')
+      return clearOffense(ctx, target.guildId, userId)
+    }, { authority: 4 })
   })
 }
 
@@ -628,6 +735,12 @@ function parseConsoleRuleId(value: unknown) {
   return id
 }
 
+function parseConsolePagination(payload: ConsoleRulePayload) {
+  const page = Math.max(1, Math.floor(Number(payload?.page)) || 1)
+  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(payload?.pageSize)) || 25))
+  return { page, pageSize }
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -641,6 +754,44 @@ function toConsoleRuleRecord(rule: ModerationRule): ConsoleRuleRecord {
     enabled: rule.enabled,
     createdBy: rule.createdBy,
     createdAt: rule.createdAt,
+  }
+}
+
+function toConsoleAuditRecord(record: ModerationAudit): ConsoleAuditRecord {
+  return {
+    id: record.id,
+    guildId: record.guildId,
+    channelId: record.channelId,
+    userId: record.userId,
+    messageId: record.messageId,
+    ruleId: record.ruleId,
+    signalCode: record.signalCode,
+    source: record.source,
+    pattern: record.pattern,
+    evidence: record.evidence,
+    action: record.action,
+    status: record.status,
+    offenseCount: record.offenseCount,
+    reviewedByAi: record.reviewedByAi,
+    aiReason: record.aiReason,
+    content: record.content,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  }
+}
+
+function toConsoleOffenseRecord(record: ModerationOffense): ConsoleOffenseRecord {
+  return {
+    id: record.id,
+    guildId: record.guildId,
+    userId: record.userId,
+    category: record.category,
+    offenseCount: record.offenseCount,
+    lastSignalCode: record.lastSignalCode,
+    lastPattern: record.lastPattern,
+    lastAction: record.lastAction,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
   }
 }
 
@@ -879,13 +1030,14 @@ function registerOffenseCommand(ctx: Context, config: FlatConfig, policy: Resolv
       if (!isPrivileged(session, config)) return '你没有权限清零违规状态。'
       if (!userId) return '请提供要清零的用户 ID。'
 
-      await ctx.database.remove('group-moderation-offense', {
-        guildId: session.guildId || '',
-        userId,
-      })
-      logger.info(`清零违规状态：群 ${session.guildId || ''}，用户 ${userId}`)
-      return `已清零用户 ${userId} 的违规状态。`
+      return clearOffense(ctx, session.guildId || '', userId)
     })
+}
+
+async function clearOffense(ctx: Context, guildId: string, userId: string) {
+  await ctx.database.remove('group-moderation-offense', { guildId, userId })
+  logger.info(`清零违规状态：群 ${guildId}，用户 ${userId}`)
+  return `已清零用户 ${userId} 的违规状态。`
 }
 
 function registerAccessListCommands(ctx: Context, config: FlatConfig) {
