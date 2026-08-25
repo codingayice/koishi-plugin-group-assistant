@@ -478,6 +478,12 @@ interface ConsoleRuleRecord {
   createdAt: string
 }
 
+interface ConsoleGroupRecord {
+  guildId: string
+  ruleCount: number
+  enabledCount: number
+}
+
 interface ConsoleClientLike {
   id: string
   send(payload: unknown): void
@@ -527,6 +533,19 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
         clearCache,
         reportProgress,
       )
+    }, { authority: 4 })
+
+    console.addListener('group-assistant/list-groups', async () => {
+      const rules = await ctx.database.get('group-moderation-rule', {})
+      const groups = new Map<string, ConsoleGroupRecord>()
+      for (const rule of rules) {
+        if (!rule.guildId) continue
+        const group = groups.get(rule.guildId) || { guildId: rule.guildId, ruleCount: 0, enabledCount: 0 }
+        group.ruleCount += 1
+        if (rule.enabled) group.enabledCount += 1
+        groups.set(rule.guildId, group)
+      }
+      return [...groups.values()].sort((left, right) => left.guildId.localeCompare(right.guildId))
     }, { authority: 4 })
 
     console.addListener('group-assistant/list-rules', async (payload: ConsoleRulePayload) => {

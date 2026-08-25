@@ -15,6 +15,12 @@ interface RuleRecord {
   createdAt: string
 }
 
+interface GroupRecord {
+  guildId: string
+  ruleCount: number
+  enabledCount: number
+}
+
 function encodeBase64(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer)
   let binary = ''
@@ -47,6 +53,9 @@ const WordlistImportPage = defineComponent({
     const statusTone = ref<'idle' | 'working' | 'success' | 'error'>('idle')
     const jobId = ref('')
     const rules = ref<RuleRecord[]>([])
+    const groups = ref<GroupRecord[]>([])
+    const groupsLoading = ref(false)
+    const guildInputElement = ref<HTMLInputElement>()
     const ruleFilter = ref<'all' | RuleScope>('all')
     const ruleSearch = ref('')
     const rulePattern = ref('')
@@ -97,6 +106,34 @@ const WordlistImportPage = defineComponent({
       setFile(event.dataTransfer?.files?.[0])
     }
 
+    const loadGroups = async () => {
+      groupsLoading.value = true
+      try {
+        const result = await send('group-assistant/list-groups')
+        groups.value = Array.isArray(result) ? result as GroupRecord[] : []
+        if (!guildId.value.trim() && groups.value.length) {
+          guildId.value = groups.value[0].guildId
+          await loadRules()
+        }
+      } catch (error) {
+        rulesStatus.value = `群列表读取失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        groupsLoading.value = false
+      }
+    }
+
+    const selectGroup = (group: GroupRecord) => {
+      guildId.value = group.guildId
+      ruleSearch.value = ''
+      ruleFilter.value = 'all'
+      void loadRules()
+    }
+
+    const focusGroupInput = () => {
+      guildInputElement.value?.focus()
+      guildInputElement.value?.select()
+    }
+
     const loadRules = async () => {
       const targetGuildId = guildId.value.trim()
       if (!targetGuildId) {
@@ -120,6 +157,8 @@ const WordlistImportPage = defineComponent({
       }
     }
 
+    void loadGroups()
+
     const createRule = async () => {
       const targetGuildId = guildId.value.trim()
       const pattern = rulePattern.value.trim()
@@ -142,6 +181,7 @@ const WordlistImportPage = defineComponent({
         rulePattern.value = ''
         rulesStatus.value = '规则创建成功。'
         await loadRules()
+        await loadGroups()
       } catch (error) {
         rulesStatus.value = `创建失败：${error instanceof Error ? error.message : String(error)}`
       } finally {
@@ -219,6 +259,7 @@ const WordlistImportPage = defineComponent({
         })
         rulesStatus.value = `规则 #${rule.id} 已删除。`
         await loadRules()
+        await loadGroups()
       } catch (error) {
         rulesStatus.value = `删除失败：${error instanceof Error ? error.message : String(error)}`
       } finally {
@@ -305,6 +346,7 @@ const WordlistImportPage = defineComponent({
         selectedFile.value = undefined
         showImport.value = false
         await loadRules()
+        await loadGroups()
       } catch (error) {
         status.value = `导入失败：${error instanceof Error ? error.message : String(error)}`
         statusTone.value = 'error'
@@ -314,6 +356,30 @@ const WordlistImportPage = defineComponent({
     }
 
     return () => h('main', { class: 'group-assistant-wordlist-page' }, [
+      h('aside', { class: 'group-sidebar' }, [
+        h('div', { class: 'group-sidebar-header' }, [
+          h('span', `群聊词库 (${groups.value.length})`),
+          h('button', {
+            class: 'group-add-button',
+            type: 'button',
+            title: '输入群号',
+            onClick: focusGroupInput,
+          }, '+'),
+        ]),
+        h('div', { class: 'group-list' }, groupsLoading.value
+          ? [h('div', { class: 'group-list-empty' }, '加载中...')]
+          : groups.value.length
+            ? groups.value.map((group) => h('button', {
+              class: ['group-item', { active: guildId.value === group.guildId }],
+              type: 'button',
+              onClick: () => selectGroup(group),
+            }, [
+              h('span', { class: 'group-item-id' }, group.guildId),
+              h('span', { class: 'group-item-count' }, `${group.enabledCount}/${group.ruleCount}`),
+            ]))
+            : [h('div', { class: 'group-list-empty' }, '暂无线库群聊')]),
+      ]),
+      h('div', { class: 'workspace-shell' }, [
       h('header', { class: 'workspace-header' }, [
         h('div', { class: 'workspace-title' }, [
           h('h1', guildId.value.trim() || '未选择群聊'),
@@ -340,6 +406,7 @@ const WordlistImportPage = defineComponent({
           h('input', {
             id: 'group-assistant-guild-id',
             class: 'ks-input guild-input',
+            ref: guildInputElement,
             value: guildId.value,
             placeholder: '例如 1047767828',
             disabled: busy.value,
@@ -502,6 +569,7 @@ const WordlistImportPage = defineComponent({
           ]),
         ]),
       ]) : null,
+      ]),
     ])
   },
 })
