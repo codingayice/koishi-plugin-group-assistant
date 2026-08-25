@@ -48,18 +48,25 @@ const WordlistImportPage = defineComponent({
     const jobId = ref('')
     const rules = ref<RuleRecord[]>([])
     const ruleFilter = ref<'all' | RuleScope>('all')
+    const ruleSearch = ref('')
     const rulePattern = ref('')
     const rulesLoading = ref(false)
     const rulesStatus = ref('填写群号后刷新规则列表。')
     const editingRuleId = ref<number>()
     const editingPattern = ref('')
     const editingScope = ref<RuleScope>('sensitive')
+    const showImport = ref(false)
 
     const fileSize = computed(() => selectedFile.value ? formatFileSize(selectedFile.value.size) : '')
     const scopeLabel = computed(() => scope.value === 'redline' ? '红线词库' : '敏感词库')
-    const visibleRules = computed(() => ruleFilter.value === 'all'
-      ? rules.value
-      : rules.value.filter((rule) => rule.scope === ruleFilter.value))
+    const visibleRules = computed(() => {
+      const search = ruleSearch.value.trim().toLowerCase()
+      return rules.value.filter((rule) => {
+        const matchesScope = ruleFilter.value === 'all' || rule.scope === ruleFilter.value
+        const matchesSearch = !search || rule.pattern.toLowerCase().includes(search)
+        return matchesScope && matchesSearch
+      })
+    })
 
     receive('group-assistant/import-progress', (data: { jobId?: string; message?: string }) => {
       if (data?.jobId !== jobId.value || !data.message) return
@@ -295,6 +302,8 @@ const WordlistImportPage = defineComponent({
         })
         status.value = String(result || `${scopeLabel.value}导入完成。`)
         statusTone.value = 'success'
+        selectedFile.value = undefined
+        showImport.value = false
         await loadRules()
       } catch (error) {
         status.value = `导入失败：${error instanceof Error ? error.message : String(error)}`
@@ -305,198 +314,194 @@ const WordlistImportPage = defineComponent({
     }
 
     return () => h('main', { class: 'group-assistant-wordlist-page' }, [
-      h('header', { class: 'page-header' }, [
-        h('div', { class: 'header-kicker' }, [
-          h('span', { class: 'kicker-line' }),
-          h('span', '群聊治理 / 规则资产'),
+      h('header', { class: 'workspace-header' }, [
+        h('div', { class: 'workspace-title' }, [
+          h('h1', guildId.value.trim() || '未选择群聊'),
+          h('span', `(${scopeLabel.value})`),
         ]),
-        h('h1', '词库与规则'),
-        h('p', '在一个工作台里导入词库，并维护指定群正在使用的治理规则。'),
-      ]),
-      h('section', { class: 'process-strip', 'aria-label': '导入流程' }, [
-        h('div', { class: 'process-step active' }, [
-          h('span', { class: 'step-number' }, '01'),
-          h('span', '配置目标'),
-        ]),
-        h('span', { class: 'process-arrow' }, '/'),
-        h('div', { class: 'process-step' }, [
-          h('span', { class: 'step-number' }, '02'),
-          h('span', '上传文件'),
-        ]),
-        h('span', { class: 'process-arrow' }, '/'),
-        h('div', { class: 'process-step' }, [
-          h('span', { class: 'step-number' }, '03'),
-          h('span', '批量写入'),
-        ]),
-      ]),
-      h('section', { class: 'import-layout' }, [
-        h('div', { class: 'config-panel panel' }, [
-          h('div', { class: 'panel-heading' }, [
-            h('div', { class: 'panel-index' }, 'A'),
-            h('div', [
-              h('h2', '导入配置'),
-              h('p', '选择词库归属，规则只会作用于这个群。'),
-            ]),
-          ]),
-          h('label', { class: 'field-label', for: 'group-assistant-guild-id' }, '目标群号'),
-          h('input', {
-            id: 'group-assistant-guild-id',
-            class: 'text-input',
-            value: guildId.value,
-            placeholder: '例如 1047767828',
-            disabled: busy.value,
-            onInput: (event: Event) => { guildId.value = (event.target as HTMLInputElement).value },
-          }),
-          h('p', { class: 'field-help' }, '填写机器人已加入的群号。'),
-          h('div', { class: 'field-label scope-label' }, '词库类型'),
-          h('div', { class: 'scope-options' }, [
-            h('label', { class: ['scope-option', { selected: scope.value === 'sensitive' }] }, [
-              h('input', {
-                type: 'radio',
-                name: 'wordlist-scope',
-                value: 'sensitive',
-                checked: scope.value === 'sensitive',
-                disabled: busy.value,
-                onChange: () => { scope.value = 'sensitive' },
-              }),
-              h('span', { class: 'scope-mark sensitive-mark' }, 'S'),
-              h('span', { class: 'scope-copy' }, [
-                h('strong', '敏感词库'),
-                h('small', '进入 AI 异步复核'),
-              ]),
-            ]),
-            h('label', { class: ['scope-option', { selected: scope.value === 'redline' }] }, [
-              h('input', {
-                type: 'radio',
-                name: 'wordlist-scope',
-                value: 'redline',
-                checked: scope.value === 'redline',
-                disabled: busy.value,
-                onChange: () => { scope.value = 'redline' },
-              }),
-              h('span', { class: 'scope-mark redline-mark' }, '!'),
-              h('span', { class: 'scope-copy' }, [
-                h('strong', '红线词库'),
-                h('small', '命中后立即处置'),
-              ]),
-            ]),
-          ]),
-          h('div', { class: 'config-note' }, [
-            h('span', { class: 'note-mark' }, 'i'),
-            h('span', '每行一个关键词，空行和 # 开头的注释会自动忽略。'),
-          ]),
-        ]),
-        h('div', { class: 'file-panel panel' }, [
-          h('div', { class: 'panel-heading' }, [
-            h('div', { class: 'panel-index' }, 'B'),
-            h('div', [
-              h('h2', '上传词库文件'),
-              h('p', '支持 UTF-8 编码 TXT，单次最多 2 MB。'),
-            ]),
-          ]),
-          h('label', {
-            class: ['dropzone', { dragging: dragging.value, 'has-file': !!selectedFile.value }],
-            onDragover: (event: DragEvent) => { event.preventDefault(); if (!busy.value) dragging.value = true },
-            onDragleave: () => { dragging.value = false },
-            onDrop: dropFile,
-          }, [
-            h('input', { type: 'file', accept: '.txt,text/plain', disabled: busy.value, onChange: chooseFile }),
-            h('div', { class: 'upload-symbol' }, selectedFile.value ? 'TXT' : '+'),
-            h('strong', selectedFile.value ? selectedFile.value.name : '拖入 TXT 文件，或点击选择'),
-            h('span', { class: 'dropzone-meta' }, selectedFile.value ? `${fileSize.value} · ${scopeLabel.value}` : '单文件最大 2 MB'),
-            selectedFile.value ? h('button', {
-              type: 'button',
-              class: 'clear-file',
-              disabled: busy.value,
-              onClick: (event: MouseEvent) => { event.preventDefault(); event.stopPropagation(); setFile() },
-            }, '移除文件') : null,
-          ]),
-          h('div', { class: 'upload-footer' }, [
-            h('span', { class: 'format-badge' }, 'UTF-8 / TXT'),
-            h('span', '导入后自动去重，不覆盖已有规则'),
-          ]),
+        h('div', { class: 'header-actions' }, [
           h('button', {
-            class: 'submit-button',
+            class: 'header-button',
             type: 'button',
             disabled: busy.value,
-            onClick: submit,
-          }, [
-            h('span', { class: 'button-icon' }, busy.value ? '...' : '↑'),
-            h('span', busy.value ? '正在导入' : '上传并导入'),
-          ]),
-        ]),
-      ]),
-      h('section', { class: 'rules-panel panel' }, [
-        h('div', { class: 'rules-heading' }, [
-          h('div', { class: 'panel-heading' }, [
-            h('div', { class: 'panel-index' }, 'C'),
-            h('div', [
-              h('h2', '规则管理'),
-              h('p', '在这里完成新增、查询、编辑、启用和删除。'),
-            ]),
-          ]),
+            onClick: () => { showImport.value = true },
+          }, '导入'),
           h('button', {
-            class: 'refresh-button',
+            class: 'header-button primary',
             type: 'button',
             disabled: rulesLoading.value,
             onClick: () => void loadRules(),
           }, rulesLoading.value ? '读取中...' : '刷新列表'),
         ]),
-        h('div', { class: 'rule-create-bar' }, [
+      ]),
+      h('section', { class: 'workspace-toolbar' }, [
+        h('label', { class: 'toolbar-field', for: 'group-assistant-guild-id' }, [
+          h('span', '目标群号'),
           h('input', {
-            class: 'rule-create-input',
-            value: rulePattern.value,
-            placeholder: `添加${scopeLabel.value}关键词`,
-            disabled: rulesLoading.value,
-            onInput: (event: Event) => { rulePattern.value = (event.target as HTMLInputElement).value },
-            onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void createRule() },
+            id: 'group-assistant-guild-id',
+            class: 'ks-input guild-input',
+            value: guildId.value,
+            placeholder: '例如 1047767828',
+            disabled: busy.value,
+            onInput: (event: Event) => { guildId.value = (event.target as HTMLInputElement).value },
+            onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void loadRules() },
           }),
-          h('span', { class: ['current-scope', scope.value] }, scopeLabel.value),
+        ]),
+        h('label', { class: 'toolbar-field scope-field' }, [
+          h('span', '当前词库'),
+          h('select', {
+            class: 'ks-input scope-select',
+            value: scope.value,
+            disabled: busy.value,
+            onChange: (event: Event) => { scope.value = (event.target as HTMLSelectElement).value as RuleScope },
+          }, [
+            h('option', { value: 'sensitive' }, '敏感词库'),
+            h('option', { value: 'redline' }, '红线词库'),
+          ]),
+        ]),
+        h('span', { class: 'toolbar-hint' }, '规则仅作用于当前群聊，敏感词进入异步复核，红线词直接处置。'),
+      ]),
+      h('section', { class: 'rules-workspace' }, [
+        h('div', { class: 'rules-toolbar' }, [
+          h('div', { class: 'rules-toolbar-title' }, [
+            h('strong', '规则列表'),
+            h('span', `${visibleRules.value.length} 条`),
+          ]),
+          h('span', { class: 'rules-status' }, rulesStatus.value),
           h('button', {
-            class: 'create-button',
+            class: 'compact-refresh',
             type: 'button',
             disabled: rulesLoading.value,
-            onClick: () => void createRule(),
-          }, '+ 添加规则'),
-        ]),
-        h('div', { class: 'rules-toolbar' }, [
-          h('span', { class: 'rules-count' }, `共 ${visibleRules.value.length} 条`),
-          h('span', { class: 'rules-status' }, rulesStatus.value),
-          h('select', {
-            class: 'filter-select',
-            value: ruleFilter.value,
-            disabled: rulesLoading.value,
-            onChange: (event: Event) => { ruleFilter.value = (event.target as HTMLSelectElement).value as typeof ruleFilter.value; void loadRules() },
-          }, [
-            h('option', { value: 'all' }, '全部分类'),
-            h('option', { value: 'sensitive' }, '仅敏感'),
-            h('option', { value: 'redline' }, '仅红线'),
-          ]),
+            title: '刷新规则列表',
+            onClick: () => void loadRules(),
+          }, '↻'),
         ]),
         h('div', { class: 'rules-table' }, [
           h('div', { class: 'rules-table-head' }, [
-            h('span', '编号'),
-            h('span', '关键词'),
-            h('span', '分类'),
+            h('span', '#'),
+            h('span', '关键词 (word)'),
+            h('span', '分类 (scope)'),
             h('span', '状态'),
-            h('span', '创建时间'),
-            h('span', '操作'),
+            h('span', '创建时间 (createdAt)'),
+            h('span', { class: 'table-actions-title' }, '操作'),
+          ]),
+          h('div', { class: 'rule-filter-row' }, [
+            h('span'),
+            h('input', {
+              class: 'ks-input',
+              value: ruleSearch.value,
+              placeholder: '搜索关键词...',
+              onInput: (event: Event) => { ruleSearch.value = (event.target as HTMLInputElement).value },
+            }),
+            h('select', {
+              class: 'ks-input',
+              value: ruleFilter.value,
+              disabled: rulesLoading.value,
+              onChange: (event: Event) => { ruleFilter.value = (event.target as HTMLSelectElement).value as typeof ruleFilter.value; void loadRules() },
+            }, [
+              h('option', { value: 'all' }, '全部'),
+              h('option', { value: 'sensitive' }, '敏感'),
+              h('option', { value: 'redline' }, '红线'),
+            ]),
+            h('span'),
+            h('span'),
+            h('span', { class: 'insert-label' }, '筛选'),
+          ]),
+          h('div', { class: 'rule-quick-row' }, [
+            h('span', { class: 'quick-add-mark' }, '+'),
+            h('input', {
+              class: 'ks-input quick-input',
+              value: rulePattern.value,
+              placeholder: '输入新关键词...',
+              disabled: rulesLoading.value,
+              onInput: (event: Event) => { rulePattern.value = (event.target as HTMLInputElement).value },
+              onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void createRule() },
+            }),
+            h('span', { class: ['scope-tag', scope.value] }, scopeLabel.value),
+            h('span', { class: 'quick-auto' }, '启用'),
+            h('span', { class: 'quick-auto' }, '自动生成'),
+            h('button', {
+              class: 'quick-submit',
+              type: 'button',
+              disabled: rulesLoading.value,
+              onClick: () => void createRule(),
+            }, '确认'),
           ]),
           visibleRules.value.length
             ? visibleRules.value.map(renderRuleRow)
             : h('div', { class: 'rules-empty' }, [
               h('strong', guildId.value.trim() ? '暂无规则' : '先填写目标群号'),
-              h('span', guildId.value.trim() ? '可以从上方添加关键词，或上传词库文件。' : '填写群号后点击“刷新列表”查看规则。'),
+              h('span', guildId.value.trim() ? '可以从上方快速添加关键词，或点击右上角导入 TXT 词库。' : '填写群号后点击“刷新列表”查看规则。'),
             ]),
         ]),
       ]),
-      h('section', { class: ['status-panel', `status-${statusTone.value}`], 'aria-live': 'polite' }, [
-        h('div', { class: 'status-indicator' }, statusTone.value === 'success' ? 'OK' : statusTone.value === 'error' ? '!' : statusTone.value === 'working' ? '...' : '·'),
-        h('div', { class: 'status-copy' }, [
-          h('span', { class: 'status-label' }, statusTone.value === 'working' ? '正在处理' : statusTone.value === 'success' ? '导入完成' : statusTone.value === 'error' ? '需要处理' : '导入状态'),
-          h('strong', status.value),
+      h('footer', { class: ['status-bar', `status-${statusTone.value}`], 'aria-live': 'polite' }, [
+        h('div', { class: 'status-left' }, [
+          h('span', { class: 'status-dot' }),
+          h('span', status.value),
         ]),
+        h('span', `Total: ${visibleRules.value.length}`),
       ]),
+      showImport.value ? h('div', {
+        class: 'import-modal-backdrop',
+        role: 'presentation',
+        onClick: () => { if (!busy.value) showImport.value = false },
+      }, [
+        h('section', {
+          class: 'import-modal',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-labelledby': 'group-assistant-import-title',
+          onClick: (event: MouseEvent) => { event.stopPropagation() },
+        }, [
+          h('div', { class: 'modal-header' }, [
+            h('h2', { id: 'group-assistant-import-title' }, '批量导入词库'),
+            h('button', {
+              class: 'modal-close',
+              type: 'button',
+              disabled: busy.value,
+              title: '关闭',
+              onClick: () => { showImport.value = false },
+            }, '×'),
+          ]),
+          h('div', { class: 'modal-body' }, [
+            h('p', { class: 'modal-description' }, `将 TXT 文件导入群 ${guildId.value.trim() || '未填写'} 的${scopeLabel.value}。`),
+            h('label', {
+              class: ['dropzone', { dragging: dragging.value, 'has-file': !!selectedFile.value }],
+              onDragover: (event: DragEvent) => { event.preventDefault(); if (!busy.value) dragging.value = true },
+              onDragleave: () => { dragging.value = false },
+              onDrop: dropFile,
+            }, [
+              h('input', { type: 'file', accept: '.txt,text/plain', disabled: busy.value, onChange: chooseFile }),
+              h('div', { class: 'upload-symbol' }, selectedFile.value ? 'TXT' : '↑'),
+              h('strong', selectedFile.value ? selectedFile.value.name : '点击上传或拖拽 TXT 文件'),
+              h('span', { class: 'dropzone-meta' }, selectedFile.value ? `${fileSize.value} · UTF-8` : '单文件最大 2 MB'),
+              selectedFile.value ? h('button', {
+                type: 'button',
+                class: 'clear-file',
+                disabled: busy.value,
+                onClick: (event: MouseEvent) => { event.preventDefault(); event.stopPropagation(); setFile() },
+              }, '移除文件') : null,
+            ]),
+            h('div', { class: 'modal-note' }, '每行一个关键词，空行和 # 开头的注释会自动忽略；导入过程会自动去重。'),
+            statusTone.value === 'error' ? h('div', { class: 'modal-error' }, status.value) : null,
+          ]),
+          h('div', { class: 'modal-footer' }, [
+            h('button', {
+              class: 'modal-button',
+              type: 'button',
+              disabled: busy.value,
+              onClick: () => { showImport.value = false },
+            }, '取消'),
+            h('button', {
+              class: 'modal-button primary',
+              type: 'button',
+              disabled: busy.value,
+              onClick: submit,
+            }, busy.value ? '正在导入...' : '开始导入'),
+          ]),
+        ]),
+      ]) : null,
     ])
   },
 })
