@@ -23,7 +23,7 @@ export function createBurstActivity(): BurstActivity {
 
 /**
  * Updates one user's sliding-window burst state.
- * `triggered` is true only when a new burst incident should count as an offense.
+ * `triggered` is true when this message opens a new punishment interval.
  */
 export function updateBurstActivity(
   activity: BurstActivity,
@@ -43,8 +43,8 @@ export function updateBurstActivity(
   let lastActiveAt = activity.lastActiveAt
 
   if (thresholdReached) {
-    const cooldownExpired = now - lastTriggeredAt >= cooldownMs
-    if (state === 'normal' || (state === 'cooldown' && cooldownExpired)) {
+    const punishmentIntervalExpired = now - lastTriggeredAt >= cooldownMs
+    if (state === 'normal' || punishmentIntervalExpired) {
       triggered = true
       lastTriggeredAt = now
     }

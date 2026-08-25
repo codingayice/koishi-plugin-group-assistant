@@ -1285,7 +1285,7 @@ function detectBehaviorSignals(
       signal.writeAudit = burst.triggered
       signals.push(signal)
       if (burst.triggered) {
-        logger.info(`触发新一轮刷屏检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${burst.timestamps.length}`)
+        logger.info(`触发刷屏处罚节点：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${burst.timestamps.length}`)
       } else {
         logger.debug(`刷屏检测处于持续状态：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${burst.timestamps.length}`)
       }

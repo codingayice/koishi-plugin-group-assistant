@@ -86,14 +86,14 @@ test('恢复并结束冷却后可以开启新一轮处罚', () => {
   assert.equal(result.state, 'active')
 })
 
-test('持续高频发送不会因为冷却结束而重复处罚', () => {
+test('持续高频发送会在冷却结束后再次累计违规', () => {
   let activity = createBurstActivity()
   let triggeredCount = 0
-  for (let index = 0; index < 30; index++) {
+  for (let index = 0; index < 70; index++) {
     activity = updateBurstActivity(activity, index * 2_000, 10_000, 3, 60_000, 15_000)
     if (activity.triggered) triggeredCount++
   }
 
-  assert.equal(triggeredCount, 1)
+  assert.equal(triggeredCount, 3)
   assert.equal(activity.state, 'active')
 })
