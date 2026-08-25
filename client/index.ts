@@ -356,6 +356,12 @@ const WordlistImportPage = defineComponent({
     }
 
     return () => h('main', { class: 'group-assistant-wordlist-page' }, [
+      h('div', { class: 'module-sidebar', 'aria-label': '模块导航' }, [
+        h('div', { class: 'module-symbol' }, '✣'),
+        h('div', { class: 'module-symbol' }, '▣'),
+        h('div', { class: ['module-symbol', 'active'] }, '▤'),
+        h('div', { class: 'module-symbol' }, '⚙'),
+      ]),
       h('aside', { class: 'group-sidebar' }, [
         h('div', { class: 'group-sidebar-header' }, [
           h('span', `群聊词库 (${groups.value.length})`),
@@ -375,7 +381,6 @@ const WordlistImportPage = defineComponent({
               onClick: () => selectGroup(group),
             }, [
               h('span', { class: 'group-item-id' }, group.guildId),
-              h('span', { class: 'group-item-count' }, `${group.enabledCount}/${group.ruleCount}`),
             ]))
             : [h('div', { class: 'group-list-empty' }, '暂无线库群聊')]),
       ]),

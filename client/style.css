@@ -35,6 +35,34 @@
   font: inherit;
 }
 
+.module-sidebar {
+  display: flex;
+  width: 48px;
+  min-width: 48px;
+  align-items: center;
+  flex-direction: column;
+  gap: 13px;
+  padding-top: 14px;
+  border-right: 1px solid #e4e7ed;
+  background: #fff;
+}
+
+.module-symbol {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #a0a4aa;
+  border-radius: 4px;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.module-symbol.active {
+  color: var(--ks-blue);
+  background: var(--ks-blue-soft);
+}
+
 .group-sidebar {
   display: flex;
   width: 224px;
@@ -773,6 +801,24 @@
 }
 
 @media (max-width: 720px) {
+  .module-sidebar {
+    width: 42px;
+    min-width: 42px;
+    gap: 8px;
+    padding-top: 10px;
+  }
+
+  .module-symbol {
+    width: 30px;
+    height: 30px;
+    font-size: 17px;
+  }
+
+  .group-sidebar {
+    width: 180px;
+    min-width: 180px;
+  }
+
   .workspace-header,
   .workspace-toolbar,
   .rules-toolbar {
