@@ -131,6 +131,27 @@ const WordlistPage = defineComponent({
       selectGroup({ guildId: targetGuildId })
     }
 
+    const deleteGroup = async (event: MouseEvent, group: GroupRecord) => {
+      event.stopPropagation()
+      if (!window.confirm(`确定删除群 ${group.guildId} 的全部红线和敏感关键词吗？`)) return
+      groupsLoading.value = true
+      try {
+        const result = await send('group-assistant/delete-group', { guildId: group.guildId })
+        if (guildId.value === group.guildId) {
+          guildId.value = ''
+          rules.value = []
+          ruleSearch.value = ''
+          cancelEdit()
+        }
+        await loadGroups()
+        rulesStatus.value = String(result || `已删除群 ${group.guildId} 的词库。`)
+      } catch (error) {
+        rulesStatus.value = `删除群词库失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        groupsLoading.value = false
+      }
+    }
+
     void loadGroups()
 
     const switchScope = (nextScope: RuleScope) => {
@@ -350,11 +371,27 @@ const WordlistPage = defineComponent({
         h('div', { class: 'group-list' }, groupsLoading.value
           ? [h('div', { class: 'group-list-empty' }, '加载中...')]
           : groups.value.length
-            ? groups.value.map((group) => h('button', {
+            ? groups.value.map((group) => h('div', {
               class: ['group-item', { active: guildId.value === group.guildId }],
-              type: 'button',
+              role: 'button',
+              tabindex: 0,
               onClick: () => selectGroup(group),
-            }, group.guildId))
+              onKeydown: (event: KeyboardEvent) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return
+                event.preventDefault()
+                selectGroup(group)
+              },
+            }, [
+              h('span', { class: 'group-item-label' }, group.guildId),
+              h('button', {
+                class: 'group-delete-button',
+                type: 'button',
+                disabled: groupsLoading.value,
+                title: `删除群 ${group.guildId} 的词库`,
+                'aria-label': `删除群 ${group.guildId} 的词库`,
+                onClick: (event: MouseEvent) => void deleteGroup(event, group),
+              }, '×'),
+            ]))
             : [h('div', { class: 'group-list-empty' }, '暂无群聊')]),
       ]),
       h('div', { class: 'page-main' }, [

@@ -585,6 +585,16 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
       const target = getConsoleRuleTarget(payload)
       return removeRule(ctx, parseConsoleRuleId(payload?.id), target, clearCache)
     }, { authority: 4 })
+
+    console.addListener('group-assistant/delete-group', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const rules = await ctx.database.get('group-moderation-rule', { guildId: target.guildId })
+      if (!rules.length) return `群 ${target.guildId} 没有词库规则。`
+      await ctx.database.remove('group-moderation-rule', { guildId: target.guildId })
+      clearCache()
+      logger.info(`Console 删除群词库：群 ${target.guildId}，删除 ${rules.length} 条规则`)
+      return `已删除群 ${target.guildId} 的 ${rules.length} 条词库规则。`
+    }, { authority: 4 })
   })
 }
 
