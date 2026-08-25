@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { Context, h, Logger, Session } from 'koishi'
+import { $, Context, h, Logger, Query, Session } from 'koishi'
 import {
   Config,
   DEFAULT_PUNISHMENT_LEVELS,
@@ -466,6 +466,9 @@ interface ConsoleRulePayload {
   pattern?: unknown
   id?: unknown
   enabled?: unknown
+  page?: unknown
+  pageSize?: unknown
+  search?: unknown
 }
 
 interface ConsoleRuleRecord {
@@ -554,13 +557,28 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
       if (payload?.scope != null && payload.scope !== '' && !scope) {
         throw new Error('词库分类只能是红线或敏感。')
       }
-      const query: Partial<ModerationRule> = { guildId: target.guildId }
+      const page = Math.max(1, Math.floor(Number(payload?.page)) || 1)
+      const pageSize = Math.min(100, Math.max(1, Math.floor(Number(payload?.pageSize)) || 50))
+      const search = typeof payload?.search === 'string' ? payload.search.trim() : ''
+      const query: Query<ModerationRule> = { guildId: target.guildId }
       if (scope) query.scope = scope
-      const rules = await ctx.database.get('group-moderation-rule', query)
-      return rules
-        .filter((rule) => isRuleScope(rule.scope))
-        .sort((left, right) => left.id - right.id)
-        .map(toConsoleRuleRecord)
+      if (search) query.pattern = { $regexFor: { input: escapeRegExp(search), flags: 'i' } }
+      const [total, rules] = await Promise.all([
+        ctx.database.eval('group-moderation-rule', row => $.count(row.id), query),
+        ctx.database.get('group-moderation-rule', query, {
+          offset: (page - 1) * pageSize,
+          limit: pageSize,
+          sort: { id: 'asc' },
+        }),
+      ])
+      return {
+        items: rules
+          .filter((rule) => isRuleScope(rule.scope))
+          .map(toConsoleRuleRecord),
+        total: Number(total) || 0,
+        page,
+        pageSize,
+      }
     }, { authority: 4 })
 
     console.addListener('group-assistant/create-rule', async (payload: ConsoleRulePayload) => {
@@ -608,6 +626,10 @@ function parseConsoleRuleId(value: unknown) {
   const id = typeof value === 'number' ? value : Number(value)
   if (!Number.isInteger(id) || id <= 0) throw new Error('规则 ID 无效。')
   return id
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function toConsoleRuleRecord(rule: ModerationRule): ConsoleRuleRecord {

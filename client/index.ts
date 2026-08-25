@@ -15,6 +15,13 @@ interface RuleRecord {
   createdAt: string
 }
 
+interface RulePageResponse {
+  items: RuleRecord[]
+  total: number
+  page: number
+  pageSize: number
+}
+
 interface GroupRecord {
   guildId: string
 }
@@ -48,6 +55,10 @@ const WordlistPage = defineComponent({
     const rulePattern = ref('')
     const rulesLoading = ref(false)
     const rulesStatus = ref('填写群号后加载词库。')
+    const currentPage = ref(1)
+    const pageSize = ref(50)
+    const totalRules = ref(0)
+    let searchTimer: ReturnType<typeof setTimeout> | undefined
     const editingRuleId = ref<number>()
     const editingPattern = ref('')
 
@@ -62,9 +73,9 @@ const WordlistPage = defineComponent({
     const scopeLabel = computed(() => scope.value === 'redline' ? '红线词库' : '敏感词库')
     const fileSize = computed(() => selectedFile.value ? formatFileSize(selectedFile.value.size) : '')
     const visibleRules = computed(() => {
-      const search = ruleSearch.value.trim().toLowerCase()
-      return rules.value.filter((rule) => rule.scope === scope.value && (!search || rule.pattern.toLowerCase().includes(search)))
+      return rules.value.filter((rule) => rule.scope === scope.value)
     })
+    const pageCount = computed(() => totalRules.value ? Math.ceil(totalRules.value / pageSize.value) : 0)
 
     receive('group-assistant/import-progress', (data: { jobId?: string; message?: string }) => {
       if (data?.jobId !== jobId.value || !data.message) return
@@ -72,22 +83,37 @@ const WordlistPage = defineComponent({
       statusTone.value = 'working'
     })
 
-    const loadRules = async () => {
+    const loadRules = async (page = currentPage.value) => {
       const targetGuildId = guildId.value.trim()
       if (!targetGuildId) {
         rules.value = []
+        totalRules.value = 0
         rulesStatus.value = '请先填写群号。'
         return
       }
+      const targetPage = Math.max(1, page)
+      currentPage.value = targetPage
       rulesLoading.value = true
-      rulesStatus.value = `正在加载${scopeLabel.value}。`
+      rulesStatus.value = `正在加载${scopeLabel.value}第 ${targetPage} 页。`
       try {
         const result = await send('group-assistant/list-rules', {
           guildId: targetGuildId,
           scope: scope.value,
+          page: targetPage,
+          pageSize: pageSize.value,
+          search: ruleSearch.value.trim(),
         })
-        rules.value = Array.isArray(result) ? result as RuleRecord[] : []
-        rulesStatus.value = `已加载 ${rules.value.length} 条关键词。`
+        const response = result as RulePageResponse
+        const total = Number(response?.total) || 0
+        const lastPage = total ? Math.ceil(total / pageSize.value) : 1
+        if (targetPage > lastPage) {
+          await loadRules(lastPage)
+          return
+        }
+        rules.value = Array.isArray(response?.items) ? response.items : []
+        totalRules.value = total
+        currentPage.value = targetPage
+        rulesStatus.value = `已加载第 ${targetPage} 页，共 ${total} 条关键词。`
       } catch (error) {
         rulesStatus.value = `加载失败：${error instanceof Error ? error.message : String(error)}`
       } finally {
@@ -119,6 +145,7 @@ const WordlistPage = defineComponent({
       if (guildId.value === group.guildId) return
       guildId.value = group.guildId
       ruleSearch.value = ''
+      currentPage.value = 1
       editingRuleId.value = undefined
       editingPattern.value = ''
       void loadRules()
@@ -142,6 +169,8 @@ const WordlistPage = defineComponent({
         if (guildId.value === group.guildId) {
           guildId.value = ''
           rules.value = []
+          totalRules.value = 0
+          currentPage.value = 1
           ruleSearch.value = ''
           cancelEdit()
         }
@@ -160,6 +189,7 @@ const WordlistPage = defineComponent({
       if (scope.value === nextScope) return
       scope.value = nextScope
       ruleSearch.value = ''
+      currentPage.value = 1
       editingRuleId.value = undefined
       editingPattern.value = ''
       void loadRules()
@@ -265,6 +295,26 @@ const WordlistPage = defineComponent({
       } finally {
         rulesLoading.value = false
       }
+    }
+
+    const scheduleSearch = (value: string) => {
+      ruleSearch.value = value
+      currentPage.value = 1
+      if (searchTimer) clearTimeout(searchTimer)
+      searchTimer = setTimeout(() => { void loadRules(1) }, 250)
+    }
+
+    const changePageSize = (value: string) => {
+      const nextSize = Number(value)
+      if (!Number.isInteger(nextSize) || nextSize <= 0 || nextSize === pageSize.value) return
+      pageSize.value = nextSize
+      currentPage.value = 1
+      void loadRules(1)
+    }
+
+    const goToPage = (page: number) => {
+      if (rulesLoading.value || page < 1 || page > pageCount.value || page === currentPage.value) return
+      void loadRules(page)
     }
 
     const setFile = (file?: File) => {
@@ -458,7 +508,7 @@ const WordlistPage = defineComponent({
           class: 'console-input search-input',
           value: ruleSearch.value,
           placeholder: '搜索关键词',
-          onInput: (event: Event) => { ruleSearch.value = (event.target as HTMLInputElement).value },
+          onInput: (event: Event) => scheduleSearch((event.target as HTMLInputElement).value),
         }),
       ]),
       h('nav', { class: 'scope-tabs', 'aria-label': '词库分类' }, [
@@ -498,8 +548,32 @@ const WordlistPage = defineComponent({
           ? visibleRules.value.map(renderRuleRow)
           : h('div', { class: 'word-table-empty' }, guildId.value.trim() ? `当前${scopeLabel.value}暂无关键词。` : '请先填写群号。'),
       ]),
+      h('div', { class: 'pagination-bar' }, [
+        h('span', { class: 'pagination-summary' }, totalRules.value ? `共 ${totalRules.value} 条` : '暂无关键词'),
+        h('div', { class: 'pagination-controls' }, [
+          h('select', {
+            class: 'page-size-select',
+            value: String(pageSize.value),
+            'aria-label': '每页条数',
+            disabled: rulesLoading.value,
+            onChange: (event: Event) => changePageSize((event.target as HTMLSelectElement).value),
+          }, [25, 50, 100].map((size) => h('option', { value: String(size) }, `${size} 条/页`))),
+          h('button', {
+            class: 'pagination-button',
+            type: 'button',
+            disabled: rulesLoading.value || currentPage.value <= 1,
+            onClick: () => goToPage(currentPage.value - 1),
+          }, '上一页'),
+          h('span', { class: 'pagination-current' }, pageCount.value ? `${currentPage.value} / ${pageCount.value}` : '0 / 0'),
+          h('button', {
+            class: 'pagination-button',
+            type: 'button',
+            disabled: rulesLoading.value || currentPage.value >= pageCount.value,
+            onClick: () => goToPage(currentPage.value + 1),
+          }, '下一页'),
+        ]),
+      ]),
       h('footer', { class: 'table-footer', 'aria-live': 'polite' }, [
-        h('span', `共 ${visibleRules.value.length} 条`),
         h('span', rulesStatus.value),
       ]),
     ])
