@@ -1,6 +1,4 @@
-import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { Context, h, Logger, Session } from 'koishi'
 import {
   Config,
@@ -446,60 +444,8 @@ function extendTables(ctx: Context) {
 }
 
 function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () => void) {
-  const pendingImports = new Map<string, PendingRuleImport>()
-
-  ctx.middleware(async (session, next) => {
-    const key = getImportKey(session)
-    const pending = key ? pendingImports.get(key) : undefined
-    if (!pending || pending.expiresAt <= Date.now()) {
-      if (pending) {
-        clearPendingImport(pendingImports, key)
-        logger.info(`词库导入等待已过期：群 ${session.guildId}，用户 ${session.userId}`)
-      }
-      return next()
-    }
-
-    const source = await getFileSource(session)
-    const link = getWordlistLink(session.content)
-    const wordlistSource = source || link.source
-    if (!wordlistSource) {
-      if (hasFileElement(session)) {
-        logger.warn(`已收到文件但无法读取：群 ${session.guildId}，用户 ${session.userId}`)
-        await session.send('已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或改用 HTTPS 下载链接。')
-        return
-      }
-      if (link.error) {
-        await session.send(link.error)
-        return
-      }
-      logger.info(`待处理词库消息未识别到可下载文件：群 ${session.guildId}，用户 ${session.userId}`)
-      return next()
-    }
-    logger.info(`识别到待导入词库${source ? '文件' : 'HTTPS 链接'}：群 ${session.guildId}，用户 ${session.userId}，分类 ${pending.scope}`)
-    clearPendingImport(pendingImports, key)
-
-    try {
-      await session.send(source ? '已收到 TXT 文件，正在读取，请稍候。' : '已收到 HTTPS 词库链接，正在下载并读取，请稍候。')
-      const content = await downloadWordlist(ctx, wordlistSource)
-      const result = await importWordlist(
-        ctx,
-        session,
-        pending.scope,
-        content,
-        clearCache,
-        createImportProgressReporter(session),
-      )
-      if (result) await session.send(result)
-      return
-    } catch (err) {
-      logger.warn(`读取词库文件失败: ${err}`)
-      await session.send('词库文件读取失败，请确认发送的是可下载的 UTF-8 文本文件。')
-      return
-    }
-  })
-
   ctx.command('规则', '管理本群红线与敏感规则')
-    .action(() => '用法：规则 添加/批量添加/导入 <红线|敏感>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
+    .action(() => '用法：规则 添加/批量添加 <红线|敏感>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
 
   ctx.command('规则.添加 <scope:string> <pattern:text>', '添加群治理关键词')
     .action(async ({ session }, scopeInput, pattern) => {
@@ -520,71 +466,6 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       if (!scope) return '规则分类只能是“红线”或“敏感”。'
       if (!content?.trim()) return '请在命令后粘贴一行一个关键词的内容。'
       return importWordlist(ctx, session, scope, content, clearCache, createImportProgressReporter(session))
-    })
-
-  ctx.command('规则.导入 <scope:string> [content:text]', '导入 TXT 群治理关键词')
-    .action(async ({ session }, scopeInput, content) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
-
-      if (scopeInput === '取消') {
-        const cancelled = clearPendingImport(pendingImports, getImportKey(session))
-        logger.info(`手动取消词库导入等待：群 ${session.guildId || ''}，用户 ${session.userId || ''}，结果 ${cancelled ? '已取消' : '不存在待处理任务'}`)
-        return '已取消待处理的词库导入。'
-      }
-
-      const scope = parseRuleScope(scopeInput)
-      if (!scope) return '规则分类只能是“红线”或“敏感”。'
-
-      const source = await getFileSource(session)
-      const link = getWordlistLink(content)
-      const wordlistSource = source || link.source
-      if (wordlistSource) {
-        try {
-          await session.send(source ? '已收到 TXT 文件，正在读取，请稍候。' : '已收到 HTTPS 词库链接，正在下载并读取，请稍候。')
-          const fileContent = await downloadWordlist(ctx, wordlistSource)
-          return importWordlist(
-            ctx,
-            session,
-            scope,
-            fileContent,
-            clearCache,
-            createImportProgressReporter(session),
-          )
-        } catch (err) {
-          logger.warn(`读取词库文件失败: ${err}`)
-          return '词库文件读取失败，请确认发送的是可下载的 UTF-8 文本文件。'
-        }
-      }
-
-      if (hasFileElement(session)) {
-        return '已收到文件，但当前适配器没有提供可读取的文件内容。请确认 QQ/LLOneBot 已缓存文件，或改用 HTTPS 下载链接。'
-      }
-
-      if (link.error) return link.error
-
-      if (content?.trim()) {
-        return importWordlist(ctx, session, scope, content, clearCache, createImportProgressReporter(session))
-      }
-      if (!session.guildId || !session.userId) return '文件导入只能在群聊中使用。'
-
-      const importKey = getImportKey(session)
-      clearPendingImport(pendingImports, importKey)
-      const pending: PendingRuleImport = {
-        scope,
-        expiresAt: Date.now() + 120_000,
-      }
-      pending.timer = setTimeout(() => {
-        if (pendingImports.get(importKey) !== pending) return
-        pendingImports.delete(importKey)
-        logger.info(`词库导入等待超时：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
-        void session.send('词库导入等待已超时，请重新发送“规则 导入 红线”或“规则 导入 敏感”。').catch((err) => {
-          logger.warn(`发送词库导入超时提示失败：${err}`)
-        })
-      }, 120_000)
-      pendingImports.set(importKey, pending)
-      logger.info(`创建词库导入等待：群 ${session.guildId}，用户 ${session.userId}，分类 ${scope}`)
-      return `请在 120 秒内发送 UTF-8 TXT 文件或 HTTPS 词库链接，目标分类：${formatScope(scope)}。`
     })
 
   ctx.command('规则.删除 <id:number>', '删除群治理规则')
@@ -617,23 +498,6 @@ function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () =
       return showRules(ctx, session, scope)
     })
 
-  ctx.on('dispose', () => {
-    for (const pending of pendingImports.values()) {
-      if (pending.timer) clearTimeout(pending.timer)
-    }
-    pendingImports.clear()
-  })
-}
-
-interface PendingRuleImport {
-  scope: RuleScope
-  expiresAt: number
-  timer?: ReturnType<typeof setTimeout>
-}
-
-interface FileElementLike {
-  type?: string
-  attrs?: Record<string, unknown>
 }
 
 interface RuleImportTarget {
@@ -709,143 +573,11 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
 
 type ImportProgressReporter = (message: string) => Promise<void>
 
-function clearPendingImport(pendingImports: Map<string, PendingRuleImport>, key: string) {
-  if (!key) return false
-  const pending = pendingImports.get(key)
-  if (!pending) return false
-  if (pending.timer) clearTimeout(pending.timer)
-  pendingImports.delete(key)
-  return true
-}
-
-function getImportKey(session: Session) {
-  return session.guildId && session.userId ? `${session.guildId}:${session.userId}` : ''
-}
-
-function getWordlistLink(content?: string) {
-  const value = content?.trim() || ''
-  if (!value || !/^https?:\/\//i.test(value)) return { source: '', error: '' }
-
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'https:') {
-      return { source: '', error: '词库下载链接必须使用 HTTPS。' }
-    }
-    return { source: url.toString(), error: '' }
-  } catch {
-    return { source: '', error: '词库下载链接格式无效。' }
-  }
-}
-
-async function getFileSource(session: Session) {
-  const sessionWithElements = session as Session & { elements?: unknown[] }
-  const elements = sessionWithElements.elements || h.parse(session.content || '')
-  const files = h.select(elements as never, 'file') as FileElementLike[]
-  if (!files.length) return ''
-
-  for (const file of files) {
-    const attrs = file.attrs || {}
-    const source = [attrs.src, attrs.url, attrs.href]
-      .find((value): value is string => typeof value === 'string' && /^https:\/\//i.test(value))
-    if (source) {
-      logger.info(`文件元素已识别：属性 ${Object.keys(attrs).join(',') || '无'}，地址主机 ${getUrlHost(source)}`)
-      return source
-    }
-
-    const fileId = [attrs.fileId, attrs.file_id]
-      .find((value): value is string => typeof value === 'string' && Boolean(value))
-    if (fileId) {
-      const source = await resolveOneBotFile(session, fileId)
-      if (source) return source
-    }
-  }
-  logger.warn(`检测到文件元素，但没有发现可读取的文件来源：属性 ${files.map((file) => Object.keys(file.attrs || {}).join(',') || '无').join('；')}`)
-  return ''
-}
-
-function hasFileElement(session: Session) {
-  const sessionWithElements = session as Session & { elements?: unknown[] }
-  const elements = sessionWithElements.elements || h.parse(session.content || '')
-  return h.select(elements as never, 'file').length > 0
-}
-
-interface OneBotFileResponse {
-  retcode?: number
-  data?: Record<string, unknown>
-}
-
-async function resolveOneBotFile(session: Session, fileId: string) {
-  const sessionWithOneBot = session as Session & {
-    onebot?: {
-      _request?: (action: string, params: Record<string, unknown>) => Promise<OneBotFileResponse>
-    }
-    bot: {
-      internal?: {
-        _request?: (action: string, params: Record<string, unknown>) => Promise<OneBotFileResponse>
-      }
-    }
-  }
-  const requestOwner = sessionWithOneBot.onebot?._request
-    ? sessionWithOneBot.onebot
-    : sessionWithOneBot.bot.internal
-  const request = requestOwner?._request
-  if (!request) {
-    logger.warn(`文件包含 fileId，但当前适配器没有 OneBot 请求接口：${fileId}`)
-    return ''
-  }
-
-  try {
-    logger.info(`通过 OneBot get_file 获取文件：${fileId}`)
-    const response = await request.call(requestOwner, 'get_file', { file_id: fileId })
-    const data = response?.data || {}
-    const source = [data.url, data.file, data.path]
-      .find((value): value is string => typeof value === 'string' && Boolean(value))
-    if (source) {
-      logger.info(`OneBot 文件获取成功：${fileId}，来源类型 ${source.startsWith('http') ? 'http' : 'local'}`)
-      return source
-    }
-    logger.warn(`OneBot get_file 未返回可读取路径：${fileId}，retcode ${response?.retcode ?? 'unknown'}`)
-  } catch (err) {
-    logger.warn(`OneBot get_file 调用失败：${fileId}，${err}`)
-  }
-  return ''
-}
-
-async function downloadWordlist(ctx: Context, source: string) {
-  if (source.startsWith('file://') || path.isAbsolute(source)) {
-    const localPath = source.startsWith('file://') ? fileURLToPath(source) : source
-    const fileStat = await stat(localPath)
-    if (!fileStat.isFile()) throw new Error('文件来源不是普通文件')
-    if (fileStat.size > WORDLIST_IMPORT_LIMITS.maxBytes) {
-      throw new Error(`文件不能超过 ${formatBytes(WORDLIST_IMPORT_LIMITS.maxBytes)}`)
-    }
-    const buffer = await readFile(localPath)
-    const content = decodeUtf8Wordlist(buffer)
-    logger.info(`本地文件读取完成：${fileStat.size} 字节`)
-    return content
-  }
-
-  if (!/^https:\/\//i.test(source)) throw new Error('词库下载链接必须使用 HTTPS')
-  logger.info(`开始下载词库文件：${getUrlHost(source)}`)
-  const content = await ctx.http.get<string>(source, { responseType: 'text' })
-  if (typeof content !== 'string') throw new Error('词库响应不是文本')
-  logger.info(`词库文件下载完成：${new TextEncoder().encode(content).byteLength} 字节`)
-  return content
-}
-
 function decodeUtf8Wordlist(buffer: Uint8Array) {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
   } catch {
     throw new Error('文件必须使用 UTF-8 编码')
-  }
-}
-
-function getUrlHost(source: string) {
-  try {
-    return new URL(source).host
-  } catch {
-    return 'unknown'
   }
 }
 
