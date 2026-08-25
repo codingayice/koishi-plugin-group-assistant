@@ -63,9 +63,24 @@ kick > mute > delete > warn > silent
 | `enabled` | `true` | 启用群治理 |
 | `governancePreset` | `balanced` | 治理强度：`relaxed`、`balanced`、`strict`、`custom` |
 | `punishmentLevels` | 3 级 | 多级累计处罚配置，最多 10 级；留空可关闭累计处罚 |
+| `offenseWindowHours` | 24 | 自定义模式下，同类违规累计窗口，单位小时 |
+| `auditRetentionDays` | `30` | 审计记录保留天数 |
+
+### 内容检测
+
+| 配置项 | 默认值 | 含义 |
+| --- | --- | --- |
+| `contentDetectionEnabled` | `true` | 启用红线词和敏感词内容检测；词库在群治理词库页面维护 |
+
+后续广告检测也归入内容检测分区，使用独立的广告识别参数和信号，不与行为检测混用。
+
+### 行为检测
+
+| 配置项 | 默认值 | 含义 |
+| --- | --- | --- |
+| `behaviorDetectionEnabled` | `true` | 启用行为检测 |
 | `burstDetectionEnabled` | `true` | 启用瞬时刷屏检测 |
 | `sustainedRateDetectionEnabled` | `true` | 启用长期发送速率检测 |
-| `auditRetentionDays` | `30` | 审计记录保留天数 |
 
 刷屏检测在首次达到阈值时记录一次违规并执行处罚。之后同一轮刷屏仍会拦截消息，处罚冷却期间不会重复累计；如果冷却结束后仍持续达到刷屏阈值，则按冷却周期再次累计违规并升级处罚。连续恢复一段时间后，当前刷屏事件结束。
 
@@ -108,7 +123,6 @@ kick > mute > delete > warn > silent
 | `sustainedBucketCapacity` | 30 | 10～200 | 长期速率令牌桶容量；每条消息消耗一个令牌 |
 | `sustainedRefillPerMinute` | 18 | 1～240 | 令牌补充速度，单位条/分钟 |
 | `sustainedConfirmSeconds` | 20 | 5～300 | 令牌耗尽后持续超速多久才确认长期刷屏 |
-| `offenseWindowHours` | 24 | 1～168 | 同类违规累计窗口 |
 
 `burstDetectionEnabled` 和 `sustainedRateDetectionEnabled` 可以分别关闭两种行为检测，在所有预设下都有效。
 

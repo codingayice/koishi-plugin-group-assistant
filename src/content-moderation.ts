@@ -89,7 +89,7 @@ export interface ModerationAccessEntry {
   createdAt: string
 }
 
-type FlatConfig = Config['base'] & Config['moderation'] & Config['deepseek']
+type FlatConfig = Config['base'] & Config['moderation'] & Config['content'] & Config['behavior'] & Config['deepseek']
 
 interface MessageViews {
   rawText: string
@@ -346,9 +346,13 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         ))
       }
 
-      signals.push(...detectBehaviorSignals(session, activity, policy))
+      if (config.behaviorDetectionEnabled !== false) {
+        signals.push(...detectBehaviorSignals(session, activity, policy))
+      }
       const ruleIndex = await getRuleIndex(ctx, cache)
-      signals.push(...findContentSignals(ruleIndex, session.guildId, views))
+      if (config.contentDetectionEnabled !== false) {
+        signals.push(...findContentSignals(ruleIndex, session.guildId, views))
+      }
 
       if (!signals.length) {
         logger.debug(`消息未命中治理规则：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)

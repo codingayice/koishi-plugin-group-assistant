@@ -89,6 +89,22 @@ const moderationSchema = {
     .min(1)
     .max(168)
     .description('自定义模式下，同类违规累计窗口，单位小时'),
+  auditRetentionDays: Schema.number()
+    .default(30)
+    .min(1)
+    .description('治理审计记录保留天数'),
+}
+
+const contentDetectionSchema = {
+  contentDetectionEnabled: Schema.boolean()
+    .default(true)
+    .description('启用内容检测；红线词和敏感词在群治理词库页面维护'),
+}
+
+const behaviorDetectionSchema = {
+  behaviorDetectionEnabled: Schema.boolean()
+    .default(true)
+    .description('启用行为检测'),
   burstDetectionEnabled: Schema.boolean()
     .default(true)
     .description('启用瞬时刷屏检测'),
@@ -130,10 +146,6 @@ const moderationSchema = {
     .min(5)
     .max(300)
     .description('自定义模式下，令牌耗尽后持续超速多久才确认刷屏，单位秒'),
-  auditRetentionDays: Schema.number()
-    .default(30)
-    .min(1)
-    .description('治理审计记录保留天数'),
 }
 
 const deepseekSchema = {
@@ -162,6 +174,13 @@ export interface Config {
     governancePreset?: 'relaxed' | 'balanced' | 'strict' | 'custom'
     punishmentLevels?: PunishmentLevelConfig[]
     offenseWindowHours?: number
+    auditRetentionDays?: number
+  }
+  content: {
+    contentDetectionEnabled?: boolean
+  }
+  behavior: {
+    behaviorDetectionEnabled?: boolean
     burstDetectionEnabled?: boolean
     burstWindowSeconds?: number
     burstMessageCount?: number
@@ -171,7 +190,6 @@ export interface Config {
     sustainedBucketCapacity?: number
     sustainedRefillPerMinute?: number
     sustainedConfirmSeconds?: number
-    auditRetentionDays?: number
   }
   deepseek: {
     aiReviewEnabled?: boolean
@@ -183,5 +201,7 @@ export interface Config {
 export const ConfigSchema = Schema.object({
   base: Schema.object(baseSchema).description('基础设置'),
   moderation: Schema.object(moderationSchema).description('群治理设置'),
+  content: Schema.object(contentDetectionSchema).description('内容检测'),
+  behavior: Schema.object(behaviorDetectionSchema).description('行为检测'),
   deepseek: Schema.object(deepseekSchema).description('AI 复核设置'),
 })
