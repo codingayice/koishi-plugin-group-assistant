@@ -8,6 +8,8 @@ import {
   PunishmentLevelConfig,
 } from './config'
 import { isSimilarText } from './similarity'
+import { createBurstActivity, updateBurstActivity } from './spam-detection'
+import type { BurstActivity } from './spam-detection'
 import { normalizeWordlistPattern, parseWordlist, WORDLIST_IMPORT_LIMITS } from './wordlist-import'
 
 const logger = new Logger('content-moderation')
@@ -103,6 +105,8 @@ interface ModerationSignal {
   action: ModerationAction
   needsAi: boolean
   ruleId: number
+  countsAsOffense: boolean
+  writeAudit: boolean
 }
 
 interface ModerationDecision {
@@ -152,7 +156,7 @@ interface AcNode {
 }
 
 interface MessageActivity {
-  timestamps: number[]
+  burst: BurstActivity
   similarHistory: SimilarMessage[]
   updatedAt: number
 }
@@ -166,6 +170,8 @@ interface ResolvedPolicy {
   burstDetectionEnabled: boolean
   burstWindowMs: number
   burstMessageCount: number
+  burstCooldownMs: number
+  burstRecoveryMs: number
   similarDetectionEnabled: boolean
   similarWindowMs: number
   similarMessageCount: number
@@ -208,6 +214,8 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
   relaxed: {
     burstWindowMs: 15_000,
     burstMessageCount: 10,
+    burstCooldownMs: 90_000,
+    burstRecoveryMs: 20_000,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 5,
     similarityThreshold: 0.90,
@@ -218,6 +226,8 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
   balanced: {
     burstWindowMs: 10_000,
     burstMessageCount: 6,
+    burstCooldownMs: 60_000,
+    burstRecoveryMs: 15_000,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 3,
     similarityThreshold: 0.86,
@@ -228,6 +238,8 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
   strict: {
     burstWindowMs: 8_000,
     burstMessageCount: 4,
+    burstCooldownMs: 45_000,
+    burstRecoveryMs: 10_000,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 3,
     similarityThreshold: 0.82,
@@ -244,6 +256,8 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
     ? {
         burstWindowMs: clampInteger(config.burstWindowSeconds ?? 10, 5, 60) * 1000,
         burstMessageCount: clampInteger(config.burstMessageCount ?? 6, 3, 20),
+        burstCooldownMs: clampInteger(config.burstCooldownSeconds ?? 60, 10, 3600) * 1000,
+        burstRecoveryMs: clampInteger(config.burstRecoverySeconds ?? 15, 5, 300) * 1000,
         similarWindowMs: clampInteger(config.similarWindowMinutes ?? 60, 10, 1440) * 60_000,
         similarMessageCount: clampInteger(config.similarMessageCount ?? 3, 2, 10),
         similarityThreshold: clampNumber(config.similarityThreshold ?? 0.86, 0.75, 0.95),
@@ -318,7 +332,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     void pruneExpiredData(ctx, config, policy).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
   }, 6 * 60 * 60_000)
   ctx.on('dispose', () => aiQueue.dispose())
-  logger.info(`群治理模块已注册：预设 ${config.governancePreset || 'balanced'}，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
+  logger.info(`群治理模块已注册：预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
   ctx.middleware(async (session, next) => {
     if (config.enabled === false || !session.guildId || !session.content?.trim()) return next()
@@ -371,10 +385,19 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         return next()
       }
 
-      const offense = await recordOffense(ctx, session.guildId, userId, selected, policy)
-      const decision = createDecision(selected, offense.offenseCount, policy)
-      logger.info(`确定性治理裁决：群 ${guildId}，用户 ${userId}，信号 ${selected.code}，动作 ${decision.action}，累计 ${offense.offenseCount} 次${decision.punishmentLevel ? `，处罚级别 ${decision.punishmentLevel.level}` : ''}`)
-      await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '')
+      const offense = selected.countsAsOffense
+        ? await recordOffense(ctx, session.guildId, userId, selected, policy)
+        : null
+      const offenseCount = offense?.offenseCount || 0
+      const decision = createDecision(selected, offenseCount, policy)
+      if (offense) {
+        logger.info(`确定性治理裁决：群 ${guildId}，用户 ${userId}，信号 ${selected.code}，动作 ${decision.action}，累计 ${offense.offenseCount} 次${decision.punishmentLevel ? `，处罚级别 ${decision.punishmentLevel.level}` : ''}`)
+      } else {
+        logger.debug(`刷屏冷却期间继续拦截：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+      }
+      if (selected.writeAudit) {
+        await createAudit(ctx, session, decision, offenseCount, 'confirmed', false, '')
+      }
       await executeAction(session, decision)
 
       if (getActionRank(decision.action) <= getActionRank('warn')) return next()
@@ -1222,6 +1245,8 @@ function ruleToSignal(rule: ModerationRule): ModerationSignal {
     action: sensitive ? 'silent' : 'delete',
     needsAi: sensitive,
     ruleId: rule.id,
+    countsAsOffense: true,
+    writeAudit: true,
   }
 }
 
@@ -1235,24 +1260,38 @@ function detectBehaviorSignals(
   const now = Date.now()
   pruneActivity(activity, now)
   const key = `${session.guildId}:${session.userId || 'unknown'}`
-  const item = activity.get(key) || { timestamps: [], similarHistory: [], updatedAt: now }
+  const item = activity.get(key) || { burst: createBurstActivity(), similarHistory: [], updatedAt: now }
   item.updatedAt = now
   if (policy.burstDetectionEnabled) {
-    item.timestamps = item.timestamps.filter((time) => now - time <= policy.burstWindowMs)
-    item.timestamps.push(now)
-    if (item.timestamps.length >= policy.burstMessageCount) {
+    const burst = updateBurstActivity(
+      item.burst,
+      now,
+      policy.burstWindowMs,
+      policy.burstMessageCount,
+      policy.burstCooldownMs,
+      policy.burstRecoveryMs,
+    )
+    item.burst = burst
+    if (burst.thresholdReached) {
       const seconds = Math.round(policy.burstWindowMs / 1000)
-      signals.push(createSignal(
+      const signal = createSignal(
         'spam_burst',
         'behavior',
         '发送频率异常',
-        `${seconds} 秒内连续发送至少 ${policy.burstMessageCount} 条消息`,
+        `${seconds} 秒内连续发送至少 ${policy.burstMessageCount} 条消息，当前窗口 ${burst.timestamps.length} 条`,
         'delete',
-      ))
-      logger.info(`触发刷屏检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${item.timestamps.length}`)
+      )
+      signal.countsAsOffense = burst.triggered
+      signal.writeAudit = burst.triggered
+      signals.push(signal)
+      if (burst.triggered) {
+        logger.info(`触发新一轮刷屏检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${burst.timestamps.length}`)
+      } else {
+        logger.debug(`刷屏检测处于持续状态：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${burst.timestamps.length}`)
+      }
     }
   } else {
-    item.timestamps = []
+    item.burst = createBurstActivity()
   }
 
   if (updateSimilarRepeatActivity(views.similarityText, now, item, policy)) {
@@ -1825,6 +1864,8 @@ function createSignal(
     action,
     needsAi: false,
     ruleId: 0,
+    countsAsOffense: true,
+    writeAudit: true,
   }
 }
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { calculateBigramDice, isSimilarByEditDistance, isSimilarText } from '../src/similarity'
+import { createBurstActivity, updateBurstActivity } from '../src/spam-detection'
 import { parseWordlist } from '../src/wordlist-import'
 
 test('Bigram Dice 能识别词组换序', () => {
@@ -39,4 +40,60 @@ test('词库解析会过滤注释并按生产归一化规则去重', () => {
   assert.equal(parsed.readCount, 4)
   assert.equal(parsed.duplicateCount, 1)
   assert.equal(parsed.invalidCount, 1)
+})
+
+test('刷屏同一轮只产生一次处罚触发', () => {
+  let activity = createBurstActivity()
+  activity = updateBurstActivity(activity, 0, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 1_000, 10_000, 3, 60_000, 15_000)
+  const result = updateBurstActivity(activity, 2_000, 10_000, 3, 60_000, 15_000)
+
+  assert.equal(result.thresholdReached, true)
+  assert.equal(result.triggered, true)
+
+  const continued = updateBurstActivity(result, 3_000, 10_000, 3, 60_000, 15_000)
+  assert.equal(continued.thresholdReached, true)
+  assert.equal(continued.triggered, false)
+  assert.equal(continued.state, 'active')
+})
+
+test('冷却期间再次刷屏只拦截，不重复处罚', () => {
+  let activity = createBurstActivity()
+  activity = updateBurstActivity(activity, 0, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 1_000, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 2_000, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 20_000, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 21_000, 10_000, 3, 60_000, 15_000)
+  const result = updateBurstActivity(activity, 22_000, 10_000, 3, 60_000, 15_000)
+
+  assert.equal(result.thresholdReached, true)
+  assert.equal(result.triggered, false)
+  assert.equal(result.state, 'active')
+})
+
+test('恢复并结束冷却后可以开启新一轮处罚', () => {
+  let activity = createBurstActivity()
+  activity = updateBurstActivity(activity, 0, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 1_000, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 2_000, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 20_000, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 63_000, 10_000, 3, 60_000, 15_000)
+  activity = updateBurstActivity(activity, 64_000, 10_000, 3, 60_000, 15_000)
+  const result = updateBurstActivity(activity, 65_000, 10_000, 3, 60_000, 15_000)
+
+  assert.equal(result.thresholdReached, true)
+  assert.equal(result.triggered, true)
+  assert.equal(result.state, 'active')
+})
+
+test('持续高频发送不会因为冷却结束而重复处罚', () => {
+  let activity = createBurstActivity()
+  let triggeredCount = 0
+  for (let index = 0; index < 30; index++) {
+    activity = updateBurstActivity(activity, index * 2_000, 10_000, 3, 60_000, 15_000)
+    if (activity.triggered) triggeredCount++
+  }
+
+  assert.equal(triggeredCount, 1)
+  assert.equal(activity.state, 'active')
 })

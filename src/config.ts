@@ -102,6 +102,16 @@ const moderationSchema = {
     .min(3)
     .max(20)
     .description('自定义模式下，窗口内达到该消息数时判定刷屏'),
+  burstCooldownSeconds: Schema.number()
+    .default(60)
+    .min(10)
+    .max(3600)
+    .description('自定义模式下，同一轮刷屏重复拦截的处罚冷却时间，单位秒'),
+  burstRecoverySeconds: Schema.number()
+    .default(15)
+    .min(5)
+    .max(300)
+    .description('自定义模式下，连续多久未再次达到刷屏阈值后恢复正常，单位秒'),
   similarDetectionEnabled: Schema.boolean()
     .default(true)
     .description('启用相似复读检测'),
@@ -169,6 +179,8 @@ export interface Config {
     burstDetectionEnabled?: boolean
     burstWindowSeconds?: number
     burstMessageCount?: number
+    burstCooldownSeconds?: number
+    burstRecoverySeconds?: number
     similarDetectionEnabled?: boolean
     similarWindowMinutes?: number
     similarMessageCount?: number
