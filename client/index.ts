@@ -1,5 +1,5 @@
 import { Context, receive, send } from '@koishijs/client'
-import { computed, defineComponent, h, ref } from 'vue'
+import { computed, defineComponent, h, ref, resolveComponent } from 'vue'
 import './style.css'
 
 const MAX_WORDLIST_BYTES = 2 * 1024 * 1024
@@ -37,6 +37,8 @@ function formatFileSize(bytes: number) {
 
 const WordlistPage = defineComponent({
   setup() {
+    const KIcon = resolveComponent('k-icon')
+    const KLayout = resolveComponent('k-layout')
     const guildId = ref('')
     const scope = ref<RuleScope>('sensitive')
     const groups = ref<GroupRecord[]>([])
@@ -361,59 +363,97 @@ const WordlistPage = defineComponent({
       ])
     }
 
-    return () => h('main', { class: 'wordlist-page' }, [
-      h('aside', { class: 'group-sidebar' }, [
+    const renderGroupSidebar = () => h('div', { class: 'group-sidebar' }, [
+      h('button', {
+        class: 'group-add-button',
+        type: 'button',
+        onClick: addGroup,
+      }, '添加群聊'),
+      h('div', { class: 'group-list' }, groupsLoading.value
+        ? [h('div', { class: 'group-list-empty' }, '加载中...')]
+        : groups.value.length
+          ? groups.value.map((group) => h('div', {
+            class: ['group-item', { active: guildId.value === group.guildId }],
+            role: 'button',
+            tabindex: 0,
+            onClick: () => selectGroup(group),
+            onKeydown: (event: KeyboardEvent) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              selectGroup(group)
+            },
+          }, [
+            h('span', { class: 'group-item-label' }, group.guildId),
+            h('button', {
+              class: 'group-delete-button',
+              type: 'button',
+              disabled: groupsLoading.value,
+              title: `删除群 ${group.guildId} 的词库`,
+              'aria-label': `删除群 ${group.guildId} 的词库`,
+              onClick: (event: MouseEvent) => void deleteGroup(event, group),
+            }, '×'),
+          ]))
+          : [h('div', { class: 'group-list-empty' }, '暂无群聊')]),
+    ])
+
+    const renderImportDialog = () => showImport.value ? h('div', {
+      class: 'import-backdrop',
+      onClick: () => { if (!busy.value) showImport.value = false },
+    }, [h('section', {
+      class: 'import-dialog',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-labelledby': 'wordlist-import-title',
+      onClick: (event: MouseEvent) => { event.stopPropagation() },
+    }, [
+      h('header', { class: 'dialog-header' }, [
+        h('h2', { id: 'wordlist-import-title' }, `导入${scopeLabel.value}`),
         h('button', {
-          class: 'group-add-button',
+          class: 'dialog-close',
           type: 'button',
-          onClick: addGroup,
-        }, '添加群聊'),
-        h('div', { class: 'group-list' }, groupsLoading.value
-          ? [h('div', { class: 'group-list-empty' }, '加载中...')]
-          : groups.value.length
-            ? groups.value.map((group) => h('div', {
-              class: ['group-item', { active: guildId.value === group.guildId }],
-              role: 'button',
-              tabindex: 0,
-              onClick: () => selectGroup(group),
-              onKeydown: (event: KeyboardEvent) => {
-                if (event.key !== 'Enter' && event.key !== ' ') return
-                event.preventDefault()
-                selectGroup(group)
-              },
-            }, [
-              h('span', { class: 'group-item-label' }, group.guildId),
-              h('button', {
-                class: 'group-delete-button',
-                type: 'button',
-                disabled: groupsLoading.value,
-                title: `删除群 ${group.guildId} 的词库`,
-                'aria-label': `删除群 ${group.guildId} 的词库`,
-                onClick: (event: MouseEvent) => void deleteGroup(event, group),
-              }, '×'),
-            ]))
-            : [h('div', { class: 'group-list-empty' }, '暂无群聊')]),
+          disabled: busy.value,
+          title: '关闭',
+          onClick: () => { showImport.value = false },
+        }, '×'),
       ]),
-      h('div', { class: 'page-main' }, [
-      h('header', { class: 'page-heading' }, [
-        h('div', [
-          h('h1', '群治理词库'),
-          h('p', guildId.value.trim() ? `当前群：${guildId.value.trim()}` : '填写群号后管理对应群聊的词库。'),
+      h('div', { class: 'dialog-body' }, [
+        h('label', {
+          class: ['file-dropzone', { dragging: dragging.value, selected: !!selectedFile.value }],
+          onDragover: (event: DragEvent) => { event.preventDefault(); if (!busy.value) dragging.value = true },
+          onDragleave: () => { dragging.value = false },
+          onDrop: dropFile,
+        }, [
+          h('input', { type: 'file', accept: '.txt,text/plain', disabled: busy.value, onChange: chooseFile }),
+          h('strong', selectedFile.value ? selectedFile.value.name : '选择或拖入 TXT 文件'),
+          h('span', selectedFile.value ? `${fileSize.value} · UTF-8` : '每行一个关键词，最大 2 MB'),
         ]),
+        h('p', { class: ['dialog-status', `tone-${statusTone.value}`] }, status.value),
+      ]),
+      h('footer', { class: 'dialog-footer' }, [
+        selectedFile.value ? h('button', {
+          class: 'console-button',
+          type: 'button',
+          disabled: busy.value,
+          onClick: () => setFile(),
+        }, '移除文件') : null,
+        h('span', { class: 'dialog-spacer' }),
         h('button', {
           class: 'console-button',
           type: 'button',
           disabled: busy.value,
-          onClick: () => { showImport.value = true },
-        }, '导入词库'),
-      ]),
-      h('section', { class: 'control-bar' }, [
+          onClick: () => { showImport.value = false },
+        }, '取消'),
         h('button', {
           class: 'console-button primary',
           type: 'button',
-          disabled: rulesLoading.value,
-          onClick: () => void loadRules(),
-        }, rulesLoading.value ? '刷新中...' : '刷新'),
+          disabled: busy.value,
+          onClick: submit,
+        }, busy.value ? '导入中...' : '开始导入'),
+      ]),
+    ])]) : null
+
+    const renderMain = () => h('div', { class: 'wordlist-main' }, [
+      h('section', { class: 'control-bar' }, [
         h('input', {
           class: 'console-input search-input',
           value: ruleSearch.value,
@@ -462,63 +502,44 @@ const WordlistPage = defineComponent({
         h('span', `共 ${visibleRules.value.length} 条`),
         h('span', rulesStatus.value),
       ]),
-      showImport.value ? h('div', {
-        class: 'import-backdrop',
-        onClick: () => { if (!busy.value) showImport.value = false },
-      }, [h('section', {
-          class: 'import-dialog',
-          role: 'dialog',
-          'aria-modal': 'true',
-          'aria-labelledby': 'wordlist-import-title',
-          onClick: (event: MouseEvent) => { event.stopPropagation() },
-        }, [
-          h('header', { class: 'dialog-header' }, [
-            h('h2', { id: 'wordlist-import-title' }, `导入${scopeLabel.value}`),
-            h('button', {
-              class: 'dialog-close',
-              type: 'button',
-              disabled: busy.value,
-              title: '关闭',
-              onClick: () => { showImport.value = false },
-            }, '×'),
-          ]),
-          h('div', { class: 'dialog-body' }, [
-            h('label', {
-              class: ['file-dropzone', { dragging: dragging.value, selected: !!selectedFile.value }],
-              onDragover: (event: DragEvent) => { event.preventDefault(); if (!busy.value) dragging.value = true },
-              onDragleave: () => { dragging.value = false },
-              onDrop: dropFile,
-            }, [
-              h('input', { type: 'file', accept: '.txt,text/plain', disabled: busy.value, onChange: chooseFile }),
-              h('strong', selectedFile.value ? selectedFile.value.name : '选择或拖入 TXT 文件'),
-              h('span', selectedFile.value ? `${fileSize.value} · UTF-8` : '每行一个关键词，最大 2 MB'),
-            ]),
-            h('p', { class: ['dialog-status', `tone-${statusTone.value}`] }, status.value),
-          ]),
-          h('footer', { class: 'dialog-footer' }, [
-            selectedFile.value ? h('button', {
-              class: 'console-button',
-              type: 'button',
-              disabled: busy.value,
-              onClick: () => setFile(),
-            }, '移除文件') : null,
-            h('span', { class: 'dialog-spacer' }),
-            h('button', {
-              class: 'console-button',
-              type: 'button',
-              disabled: busy.value,
-              onClick: () => { showImport.value = false },
-            }, '取消'),
-            h('button', {
-              class: 'console-button primary',
-              type: 'button',
-              disabled: busy.value,
-              onClick: submit,
-            }, busy.value ? '导入中...' : '开始导入'),
-          ]),
-        ])]) : null,
-      ]),
     ])
+
+    return () => h(KLayout, { class: 'wordlist-layout' }, {
+      header: () => [
+        h('span', { class: 'wordlist-header-title' }, '群治理词库'),
+        guildId.value.trim()
+          ? h('span', { class: 'wordlist-header-group' }, `群 ${guildId.value.trim()}`)
+          : null,
+      ],
+      menu: () => [
+        h('span', {
+          class: ['menu-item', { disabled: busy.value }],
+          role: 'button',
+          tabindex: 0,
+          title: '导入词库',
+          onClick: () => { if (!busy.value) showImport.value = true },
+          onKeydown: (event: KeyboardEvent) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            if (!busy.value) showImport.value = true
+          },
+        }, [h('span', { class: 'wordlist-menu-text' }, '导入')]),
+        h('span', {
+          class: ['menu-item', { disabled: rulesLoading.value }],
+          role: 'button',
+          tabindex: 0,
+          title: '刷新词库',
+          onClick: () => { if (!rulesLoading.value) void loadRules() },
+          onKeydown: (event: KeyboardEvent) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            if (!rulesLoading.value) void loadRules()
+          },
+        }, [h(KIcon, { class: 'menu-icon', name: 'refresh' })]),
+      ],
+      left: renderGroupSidebar,
+      default: () => [renderMain(), renderImportDialog()],
+    })
   },
 })
 
