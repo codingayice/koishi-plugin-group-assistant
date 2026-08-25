@@ -1677,6 +1677,7 @@ async function sendPunishmentNotice(
   const replacements: Record<string, string> = {
     '{at}': String(h('at', { id: userId })),
     '{reason}': decision.signal.publicReason,
+    '{matched}': formatMatchedSignal(decision.signal),
     '{action}': formatAction(level.action),
     '{muteMinutes}': String(level.action === 'mute' ? level.muteDurationMinutes : 0),
     '{offenseCount}': String(decision.offenseCount),
@@ -1687,6 +1688,11 @@ async function sendPunishmentNotice(
     message = message.split(placeholder).join(value)
   }
   if (message.trim()) await session.send(message)
+}
+
+function formatMatchedSignal(signal: ModerationSignal) {
+  if (signal.source === 'content') return signal.pattern || signal.publicReason
+  return signal.publicReason
 }
 
 async function deleteMessage(session: Session) {

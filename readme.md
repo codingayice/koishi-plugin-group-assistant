@@ -110,7 +110,7 @@ kick > mute > delete > warn > silent
 | `muteDurationMinutes` | 1～10080 | 禁言时长，仅 `mute` 生效 |
 | `messageTemplate` | 空 | 本级群内提醒模板；留空时静默执行处罚 |
 
-模板支持 `{at}`、`{reason}`、`{action}`、`{muteMinutes}`、`{offenseCount}` 和 `{level}`。模板有内容时发送群内处罚通知，留空时直接执行处罚而不通知。级别会按 `offenseCount` 从小到大整理；违规次数增长后，插件从所有已达到的级别中选择最强处罚，同为禁言时选择时长更长的一项，防止错误配置导致处罚降级。配置为空数组时只保留规则自身的撤回等即时处理，不再执行累计警告、禁言或踢出。
+模板支持 `{at}`、`{reason}`、`{matched}`、`{action}`、`{muteMinutes}`、`{offenseCount}` 和 `{level}`。其中 `{matched}` 在内容违规时显示实际命中的关键词，在行为违规时显示行为原因。模板有内容时发送群内处罚通知，留空时直接执行处罚而不通知。级别会按 `offenseCount` 从小到大整理；违规次数增长后，插件从所有已达到的级别中选择最强处罚，同为禁言时选择时长更长的一项，防止错误配置导致处罚降级。配置为空数组时只保留规则自身的撤回等即时处理，不再执行累计警告、禁言或踢出。
 
 以下高级参数只在 `governancePreset` 为 `custom` 时生效：
 
