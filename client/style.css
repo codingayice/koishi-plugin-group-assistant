@@ -37,68 +37,57 @@
 
 .group-sidebar {
   display: flex;
-  width: 220px;
-  min-width: 220px;
+  width: var(--aside-width, 17.5rem);
+  min-width: var(--aside-width, 17.5rem);
   min-height: 0;
   flex-direction: column;
   border-right: 1px solid var(--wordlist-border);
   background: var(--wordlist-side);
 }
 
-.group-sidebar-header {
-  display: flex;
-  min-height: 48px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 14px 0 18px;
-  color: var(--wordlist-text-light);
-  border-bottom: 1px solid var(--wordlist-border);
-  font-size: 12px;
-}
-
 .group-add-button {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
+  width: 100%;
+  min-height: 56px;
   padding: 0;
   color: var(--wordlist-text-light);
   border: 0;
-  border-radius: 4px;
+  border-bottom: 1px solid var(--wordlist-border);
+  border-radius: 0;
   outline: none;
-  background: transparent;
+  background: var(--wordlist-panel);
   cursor: pointer;
-  font-size: 20px;
+  font-size: 16px;
+  font-weight: 600;
   line-height: 1;
+  text-align: center;
 }
 
 .group-add-button:hover,
 .group-add-button:focus-visible {
   color: var(--wordlist-primary);
-  background: var(--wordlist-hover);
+  background: var(--wordlist-panel);
 }
 
 .group-list {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
-  padding: 6px 0;
+  padding: 0;
 }
 
 .group-item {
   display: block;
   width: 100%;
-  min-height: 40px;
+  min-height: 64px;
   overflow: hidden;
-  padding: 0 18px;
+  padding: 0 24px;
   color: var(--wordlist-text);
   border: 0;
-  border-right: 2px solid transparent;
   outline: none;
   background: transparent;
   cursor: pointer;
   font-size: 13px;
-  line-height: 40px;
+  line-height: 64px;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -111,8 +100,7 @@
 
 .group-item.active {
   color: var(--wordlist-primary);
-  border-right-color: var(--wordlist-primary);
-  background: var(--wordlist-hover);
+  background: var(--k-tree-bg-active, var(--wordlist-hover));
 }
 
 .group-list-empty {
@@ -540,11 +528,6 @@
 }
 
 @media (max-width: 720px) {
-  .group-sidebar {
-    width: 176px;
-    min-width: 176px;
-  }
-
   .page-main {
     padding: 16px;
   }
@@ -570,11 +553,6 @@
 }
 
 @media (max-width: 480px) {
-  .group-sidebar {
-    width: 140px;
-    min-width: 140px;
-  }
-
   .group-item {
     padding: 0 12px;
   }

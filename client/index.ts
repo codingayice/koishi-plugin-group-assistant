@@ -342,15 +342,11 @@ const WordlistPage = defineComponent({
 
     return () => h('main', { class: 'wordlist-page' }, [
       h('aside', { class: 'group-sidebar' }, [
-        h('header', { class: 'group-sidebar-header' }, [
-          h('span', '群聊'),
-          h('button', {
-            class: 'group-add-button',
-            type: 'button',
-            title: '添加群聊',
-            onClick: addGroup,
-          }, '+'),
-        ]),
+        h('button', {
+          class: 'group-add-button',
+          type: 'button',
+          onClick: addGroup,
+        }, '添加群聊'),
         h('div', { class: 'group-list' }, groupsLoading.value
           ? [h('div', { class: 'group-list-empty' }, '加载中...')]
           : groups.value.length
