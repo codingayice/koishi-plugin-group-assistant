@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-group-assistant",
   "description": "面向 Koishi 的群聊准入、内容治理与 AI 审核插件",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "scripts": {
