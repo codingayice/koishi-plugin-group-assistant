@@ -55,7 +55,6 @@ const WordlistImportPage = defineComponent({
     const rules = ref<RuleRecord[]>([])
     const groups = ref<GroupRecord[]>([])
     const groupsLoading = ref(false)
-    const guildInputElement = ref<HTMLInputElement>()
     const ruleFilter = ref<'all' | RuleScope>('all')
     const ruleSearch = ref('')
     const rulePattern = ref('')
@@ -129,11 +128,6 @@ const WordlistImportPage = defineComponent({
       void loadRules()
     }
 
-    const focusGroupInput = () => {
-      guildInputElement.value?.focus()
-      guildInputElement.value?.select()
-    }
-
     const loadRules = async () => {
       const targetGuildId = guildId.value.trim()
       if (!targetGuildId) {
@@ -155,6 +149,18 @@ const WordlistImportPage = defineComponent({
       } finally {
         rulesLoading.value = false
       }
+    }
+
+    const addGroup = () => {
+      const targetGuildId = window.prompt('请输入群号：', guildId.value.trim())?.trim()
+      if (!targetGuildId) return
+      if (!groups.value.some((group) => group.guildId === targetGuildId)) {
+        groups.value = [...groups.value, { guildId: targetGuildId, ruleCount: 0, enabledCount: 0 }]
+      }
+      guildId.value = targetGuildId
+      ruleSearch.value = ''
+      ruleFilter.value = 'all'
+      void loadRules()
     }
 
     void loadGroups()
@@ -227,6 +233,23 @@ const WordlistImportPage = defineComponent({
       }
     }
 
+    const applyEdit = () => {
+      const rule = rules.value.find((item) => item.id === editingRuleId.value)
+      if (rule) {
+        void saveEdit(rule)
+      } else {
+        void loadRules()
+      }
+    }
+
+    const cancelChanges = () => {
+      cancelEdit()
+      ruleSearch.value = ''
+      rulePattern.value = ''
+      ruleFilter.value = 'all'
+      void loadRules()
+    }
+
     const toggleRule = async (rule: RuleRecord) => {
       const targetGuildId = guildId.value.trim()
       rulesLoading.value = true
@@ -270,8 +293,8 @@ const WordlistImportPage = defineComponent({
     const renderRuleRow = (rule: RuleRecord) => {
       const editing = editingRuleId.value === rule.id
       return h('div', { class: ['rule-row', { disabled: !rule.enabled, editing }], key: rule.id }, [
-        h('span', { class: 'rule-id' }, `#${rule.id}`),
-        editing
+        h('span', { class: 'table-cell rule-id' }, `#${rule.id}`),
+        h('div', { class: 'table-cell' }, [editing
           ? h('input', {
             class: 'rule-edit-input',
             value: editingPattern.value,
@@ -279,8 +302,8 @@ const WordlistImportPage = defineComponent({
             onInput: (event: Event) => { editingPattern.value = (event.target as HTMLInputElement).value },
             onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void saveEdit(rule) },
           })
-          : h('span', { class: 'rule-pattern', title: rule.pattern }, rule.pattern),
-        editing
+          : h('span', { class: 'rule-pattern', title: rule.pattern }, rule.pattern)]),
+        h('div', { class: 'table-cell' }, [editing
           ? h('select', {
             class: 'rule-scope-select',
             value: editingScope.value,
@@ -290,10 +313,12 @@ const WordlistImportPage = defineComponent({
             h('option', { value: 'sensitive' }, '敏感'),
             h('option', { value: 'redline' }, '红线'),
           ])
-          : h('span', { class: ['rule-scope', rule.scope] }, rule.scope === 'redline' ? '红线' : '敏感'),
-        h('span', { class: ['rule-state', rule.enabled ? 'enabled' : 'disabled'] }, rule.enabled ? '启用' : '停用'),
-        h('span', { class: 'rule-date' }, formatRuleDate(rule.createdAt)),
-        h('div', { class: 'rule-actions' }, editing ? [
+          : h('span', { class: ['rule-scope', rule.scope] }, rule.scope === 'redline' ? '红线' : '敏感')]),
+        h('div', { class: 'table-cell' }, [
+          h('span', { class: ['rule-state', rule.enabled ? 'enabled' : 'disabled'] }, rule.enabled ? '启用' : '停用'),
+        ]),
+        h('span', { class: 'table-cell rule-date' }, formatRuleDate(rule.createdAt)),
+        h('div', { class: 'table-cell rule-actions' }, editing ? [
           h('button', { class: 'text-button primary', type: 'button', disabled: rulesLoading.value, onClick: () => void saveEdit(rule) }, '保存'),
           h('button', { class: 'text-button', type: 'button', disabled: rulesLoading.value, onClick: cancelEdit }, '取消'),
         ] : [
@@ -357,10 +382,10 @@ const WordlistImportPage = defineComponent({
 
     return () => h('main', { class: 'group-assistant-wordlist-page' }, [
       h('div', { class: 'module-sidebar', 'aria-label': '模块导航' }, [
-        h('div', { class: 'module-symbol' }, '✣'),
-        h('div', { class: 'module-symbol' }, '▣'),
-        h('div', { class: ['module-symbol', 'active'] }, '▤'),
-        h('div', { class: 'module-symbol' }, '⚙'),
+        h('div', { class: 'module-symbol', title: '插件' }, '🧩'),
+        h('div', { class: 'module-symbol', title: '资源' }, '📦'),
+        h('div', { class: ['module-symbol', 'active'], title: '词库' }, '🗄️'),
+        h('div', { class: 'module-symbol', title: '设置' }, '⚙️'),
       ]),
       h('aside', { class: 'group-sidebar' }, [
         h('div', { class: 'group-sidebar-header' }, [
@@ -368,8 +393,8 @@ const WordlistImportPage = defineComponent({
           h('button', {
             class: 'group-add-button',
             type: 'button',
-            title: '输入群号',
-            onClick: focusGroupInput,
+            title: '添加群聊',
+            onClick: addGroup,
           }, '+'),
         ]),
         h('div', { class: 'group-list' }, groupsLoading.value
@@ -388,7 +413,16 @@ const WordlistImportPage = defineComponent({
       h('header', { class: 'workspace-header' }, [
         h('div', { class: 'workspace-title' }, [
           h('h1', guildId.value.trim() || '未选择群聊'),
-          h('span', `(${scopeLabel.value})`),
+          h('select', {
+            class: 'header-scope-select',
+            value: scope.value,
+            disabled: busy.value,
+            'aria-label': '词库类型',
+            onChange: (event: Event) => { scope.value = (event.target as HTMLSelectElement).value as RuleScope },
+          }, [
+            h('option', { value: 'sensitive' }, '(敏感词库)'),
+            h('option', { value: 'redline' }, '(红线词库)'),
+          ]),
         ]),
         h('div', { class: 'header-actions' }, [
           h('button', {
@@ -401,103 +435,67 @@ const WordlistImportPage = defineComponent({
             class: 'header-button primary',
             type: 'button',
             disabled: rulesLoading.value,
-            onClick: () => void loadRules(),
-          }, rulesLoading.value ? '读取中...' : '刷新列表'),
-        ]),
-      ]),
-      h('section', { class: 'workspace-toolbar' }, [
-        h('label', { class: 'toolbar-field', for: 'group-assistant-guild-id' }, [
-          h('span', '目标群号'),
-          h('input', {
-            id: 'group-assistant-guild-id',
-            class: 'ks-input guild-input',
-            ref: guildInputElement,
-            value: guildId.value,
-            placeholder: '例如 1047767828',
-            disabled: busy.value,
-            onInput: (event: Event) => { guildId.value = (event.target as HTMLInputElement).value },
-            onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void loadRules() },
-          }),
-        ]),
-        h('label', { class: 'toolbar-field scope-field' }, [
-          h('span', '当前词库'),
-          h('select', {
-            class: 'ks-input scope-select',
-            value: scope.value,
-            disabled: busy.value,
-            onChange: (event: Event) => { scope.value = (event.target as HTMLSelectElement).value as RuleScope },
-          }, [
-            h('option', { value: 'sensitive' }, '敏感词库'),
-            h('option', { value: 'redline' }, '红线词库'),
-          ]),
-        ]),
-        h('span', { class: 'toolbar-hint' }, '规则仅作用于当前群聊，敏感词进入异步复核，红线词直接处置。'),
-      ]),
-      h('section', { class: 'rules-workspace' }, [
-        h('div', { class: 'rules-toolbar' }, [
-          h('div', { class: 'rules-toolbar-title' }, [
-            h('strong', '规则列表'),
-            h('span', `${visibleRules.value.length} 条`),
-          ]),
-          h('span', { class: 'rules-status' }, rulesStatus.value),
+            onClick: applyEdit,
+          }, rulesLoading.value ? '保存中...' : '应用修改'),
           h('button', {
-            class: 'compact-refresh',
+            class: 'header-button danger',
             type: 'button',
             disabled: rulesLoading.value,
-            title: '刷新规则列表',
-            onClick: () => void loadRules(),
-          }, '↻'),
+            onClick: cancelChanges,
+          }, '取消修改'),
         ]),
+      ]),
+      h('section', { class: 'rules-workspace' }, [
         h('div', { class: 'rules-table' }, [
           h('div', { class: 'rules-table-head' }, [
-            h('span', '#'),
-            h('span', '关键词 (word)'),
-            h('span', '分类 (scope)'),
-            h('span', '状态'),
-            h('span', '创建时间 (createdAt)'),
-            h('span', { class: 'table-actions-title' }, '操作'),
+            h('span', { class: 'table-cell' }, '#'),
+            h('span', { class: 'table-cell' }, '关键词 (word)'),
+            h('span', { class: 'table-cell' }, '分类 (scope)'),
+            h('span', { class: 'table-cell' }, '状态'),
+            h('span', { class: 'table-cell' }, '创建时间 (createdAt)'),
+            h('span', { class: 'table-cell table-actions-title' }, '操作'),
           ]),
           h('div', { class: 'rule-filter-row' }, [
-            h('span'),
-            h('input', {
-              class: 'ks-input',
-              value: ruleSearch.value,
-              placeholder: '搜索关键词...',
-              onInput: (event: Event) => { ruleSearch.value = (event.target as HTMLInputElement).value },
-            }),
-            h('select', {
-              class: 'ks-input',
-              value: ruleFilter.value,
-              disabled: rulesLoading.value,
-              onChange: (event: Event) => { ruleFilter.value = (event.target as HTMLSelectElement).value as typeof ruleFilter.value; void loadRules() },
-            }, [
-              h('option', { value: 'all' }, '全部'),
-              h('option', { value: 'sensitive' }, '敏感'),
-              h('option', { value: 'redline' }, '红线'),
-            ]),
-            h('span'),
-            h('span'),
-            h('span', { class: 'insert-label' }, '筛选'),
+            h('span', { class: 'table-cell' }),
+            h('div', { class: 'table-cell filter-cell' }, [h('input', {
+                class: 'ks-input',
+                value: ruleSearch.value,
+                placeholder: '搜索...',
+                onInput: (event: Event) => { ruleSearch.value = (event.target as HTMLInputElement).value },
+              })]),
+            h('div', { class: 'table-cell filter-cell' }, [h('select', {
+                class: 'ks-input',
+                value: ruleFilter.value,
+                disabled: rulesLoading.value,
+                onChange: (event: Event) => { ruleFilter.value = (event.target as HTMLSelectElement).value as typeof ruleFilter.value; void loadRules() },
+              }, [
+                h('option', { value: 'all' }, '全部'),
+                h('option', { value: 'sensitive' }, '敏感'),
+                h('option', { value: 'redline' }, '红线'),
+              ])]),
+            h('span', { class: 'table-cell' }),
+            h('div', { class: 'table-cell filter-cell' }, [h('input', { class: 'ks-input', disabled: true })]),
+            h('span', { class: 'table-cell insert-label' }, '插入'),
           ]),
           h('div', { class: 'rule-quick-row' }, [
-            h('span', { class: 'quick-add-mark' }, '+'),
-            h('input', {
-              class: 'ks-input quick-input',
-              value: rulePattern.value,
-              placeholder: '输入新关键词...',
-              disabled: rulesLoading.value,
-              onInput: (event: Event) => { rulePattern.value = (event.target as HTMLInputElement).value },
-              onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void createRule() },
-            }),
-            h('span', { class: ['scope-tag', scope.value] }, scopeLabel.value),
-            h('span', { class: 'quick-auto' }, '启用'),
-            h('span', { class: 'quick-auto' }, '自动生成'),
-            h('button', {
-              class: 'quick-submit',
-              type: 'button',
-              disabled: rulesLoading.value,
-              onClick: () => void createRule(),
-            }, '确认'),
+            h('span', { class: 'table-cell quick-add-mark' }, '+'),
+            h('div', { class: 'table-cell quick-cell' }, [h('input', {
+                class: 'ks-input quick-input',
+                value: rulePattern.value,
+                placeholder: '输入新关键词...',
+                disabled: rulesLoading.value,
+                onInput: (event: Event) => { rulePattern.value = (event.target as HTMLInputElement).value },
+                onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void createRule() },
+              })]),
+            h('div', { class: 'table-cell' }, [h('span', { class: ['scope-tag', scope.value] }, scopeLabel.value)]),
+            h('span', { class: 'table-cell quick-auto' }, '启用'),
+            h('span', { class: 'table-cell quick-auto' }, '自动生成'),
+            h('div', { class: 'table-cell table-action-cell' }, [h('button', {
+                class: 'quick-submit',
+                type: 'button',
+                disabled: rulesLoading.value,
+                onClick: () => void createRule(),
+              }, '确认')]),
           ]),
           visibleRules.value.length
             ? visibleRules.value.map(renderRuleRow)
@@ -508,11 +506,14 @@ const WordlistImportPage = defineComponent({
         ]),
       ]),
       h('footer', { class: ['status-bar', `status-${statusTone.value}`], 'aria-live': 'polite' }, [
+        h('div', { class: 'status-metrics' }, [
+          h('span', `Total: ${visibleRules.value.length}`),
+          h('span', rulesStatus.value),
+        ]),
         h('div', { class: 'status-left' }, [
           h('span', { class: 'status-dot' }),
           h('span', status.value),
         ]),
-        h('span', `Total: ${visibleRules.value.length}`),
       ]),
       showImport.value ? h('div', {
         class: 'import-modal-backdrop',
@@ -537,7 +538,6 @@ const WordlistImportPage = defineComponent({
             }, '×'),
           ]),
           h('div', { class: 'modal-body' }, [
-            h('p', { class: 'modal-description' }, `将 TXT 文件导入群 ${guildId.value.trim() || '未填写'} 的${scopeLabel.value}。`),
             h('label', {
               class: ['dropzone', { dragging: dragging.value, 'has-file': !!selectedFile.value }],
               onDragover: (event: DragEvent) => { event.preventDefault(); if (!busy.value) dragging.value = true },
@@ -545,9 +545,8 @@ const WordlistImportPage = defineComponent({
               onDrop: dropFile,
             }, [
               h('input', { type: 'file', accept: '.txt,text/plain', disabled: busy.value, onChange: chooseFile }),
-              h('div', { class: 'upload-symbol' }, selectedFile.value ? 'TXT' : '↑'),
-              h('strong', selectedFile.value ? selectedFile.value.name : '点击上传或拖拽 TXT 文件'),
-              h('span', { class: 'dropzone-meta' }, selectedFile.value ? `${fileSize.value} · UTF-8` : '单文件最大 2 MB'),
+              h('strong', selectedFile.value ? selectedFile.value.name : '点击上传或拖拽文件 (TXT)'),
+              selectedFile.value ? h('span', { class: 'dropzone-meta' }, `${fileSize.value} · UTF-8`) : null,
               selectedFile.value ? h('button', {
                 type: 'button',
                 class: 'clear-file',
@@ -555,7 +554,7 @@ const WordlistImportPage = defineComponent({
                 onClick: (event: MouseEvent) => { event.preventDefault(); event.stopPropagation(); setFile() },
               }, '移除文件') : null,
             ]),
-            h('div', { class: 'modal-note' }, '每行一个关键词，空行和 # 开头的注释会自动忽略；导入过程会自动去重。'),
+            h('div', { class: 'modal-note' }, `目标群 ${guildId.value.trim() || '未填写'} · ${scopeLabel.value} · 每行一个关键词，自动忽略空行和注释。`),
             statusTone.value === 'error' ? h('div', { class: 'modal-error' }, status.value) : null,
           ]),
           h('div', { class: 'modal-footer' }, [
