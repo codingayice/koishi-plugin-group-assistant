@@ -10,6 +10,8 @@ import {
 import { isSimilarText } from './similarity'
 import { createBurstActivity, updateBurstActivity } from './spam-detection'
 import type { BurstActivity } from './spam-detection'
+import { createSustainedRateActivity, updateSustainedRateActivity } from './sustained-rate'
+import type { SustainedRateActivity } from './sustained-rate'
 import { normalizeWordlistPattern, parseWordlist, WORDLIST_IMPORT_LIMITS } from './wordlist-import'
 
 const logger = new Logger('content-moderation')
@@ -22,6 +24,7 @@ type SignalCode =
   | 'redline_keyword'
   | 'sensitive_keyword'
   | 'spam_burst'
+  | 'spam_sustained'
   | 'similar_repeat'
   | 'manual_action'
 
@@ -157,6 +160,7 @@ interface AcNode {
 
 interface MessageActivity {
   burst: BurstActivity
+  sustained: SustainedRateActivity
   similarHistory: SimilarMessage[]
   updatedAt: number
 }
@@ -172,6 +176,10 @@ interface ResolvedPolicy {
   burstMessageCount: number
   burstCooldownMs: number
   burstRecoveryMs: number
+  sustainedRateDetectionEnabled: boolean
+  sustainedBucketCapacity: number
+  sustainedRefillPerMinute: number
+  sustainedConfirmMs: number
   similarDetectionEnabled: boolean
   similarWindowMs: number
   similarMessageCount: number
@@ -209,6 +217,7 @@ const INTERNAL_POLICY = {
 const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
   | 'burstDetectionEnabled'
   | 'similarDetectionEnabled'
+  | 'sustainedRateDetectionEnabled'
   | 'punishmentLevels'
 >> = {
   relaxed: {
@@ -216,6 +225,9 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     burstMessageCount: 10,
     burstCooldownMs: 90_000,
     burstRecoveryMs: 20_000,
+    sustainedBucketCapacity: 45,
+    sustainedRefillPerMinute: 24,
+    sustainedConfirmMs: 30_000,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 5,
     similarityThreshold: 0.90,
@@ -228,6 +240,9 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     burstMessageCount: 6,
     burstCooldownMs: 60_000,
     burstRecoveryMs: 15_000,
+    sustainedBucketCapacity: 30,
+    sustainedRefillPerMinute: 18,
+    sustainedConfirmMs: 20_000,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 3,
     similarityThreshold: 0.86,
@@ -240,6 +255,9 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     burstMessageCount: 4,
     burstCooldownMs: 45_000,
     burstRecoveryMs: 10_000,
+    sustainedBucketCapacity: 20,
+    sustainedRefillPerMinute: 12,
+    sustainedConfirmMs: 15_000,
     similarWindowMs: 60 * 60_000,
     similarMessageCount: 3,
     similarityThreshold: 0.82,
@@ -258,6 +276,9 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
         burstMessageCount: clampInteger(config.burstMessageCount ?? 6, 3, 20),
         burstCooldownMs: clampInteger(config.burstCooldownSeconds ?? 60, 10, 3600) * 1000,
         burstRecoveryMs: clampInteger(config.burstRecoverySeconds ?? 15, 5, 300) * 1000,
+        sustainedBucketCapacity: clampInteger(config.sustainedBucketCapacity ?? 30, 10, 200),
+        sustainedRefillPerMinute: clampInteger(config.sustainedRefillPerMinute ?? 18, 1, 240),
+        sustainedConfirmMs: clampInteger(config.sustainedConfirmSeconds ?? 20, 5, 300) * 1000,
         similarWindowMs: clampInteger(config.similarWindowMinutes ?? 60, 10, 1440) * 60_000,
         similarMessageCount: clampInteger(config.similarMessageCount ?? 3, 2, 10),
         similarityThreshold: clampNumber(config.similarityThreshold ?? 0.86, 0.75, 0.95),
@@ -270,6 +291,7 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
   return {
     ...strategy,
     burstDetectionEnabled: config.burstDetectionEnabled !== false,
+    sustainedRateDetectionEnabled: config.sustainedRateDetectionEnabled !== false,
     similarDetectionEnabled: config.similarDetectionEnabled !== false,
     punishmentLevels: resolvePunishmentLevels(config.punishmentLevels),
   }
@@ -332,7 +354,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     void pruneExpiredData(ctx, config, policy).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
   }, 6 * 60 * 60_000)
   ctx.on('dispose', () => aiQueue.dispose())
-  logger.info(`群治理模块已注册：预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
+  logger.info(`群治理模块已注册：预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，长期速率 ${policy.sustainedBucketCapacity} 条桶/${policy.sustainedRefillPerMinute} 条每分钟，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
   ctx.middleware(async (session, next) => {
     if (config.enabled === false || !session.guildId || !session.content?.trim()) return next()
@@ -1260,7 +1282,12 @@ function detectBehaviorSignals(
   const now = Date.now()
   pruneActivity(activity, now)
   const key = `${session.guildId}:${session.userId || 'unknown'}`
-  const item = activity.get(key) || { burst: createBurstActivity(), similarHistory: [], updatedAt: now }
+  const item = activity.get(key) || {
+    burst: createBurstActivity(),
+    sustained: createSustainedRateActivity(policy.sustainedBucketCapacity, now),
+    similarHistory: [],
+    updatedAt: now,
+  }
   item.updatedAt = now
   if (policy.burstDetectionEnabled) {
     const burst = updateBurstActivity(
@@ -1292,6 +1319,37 @@ function detectBehaviorSignals(
     }
   } else {
     item.burst = createBurstActivity()
+  }
+
+  if (policy.sustainedRateDetectionEnabled) {
+    const sustained = updateSustainedRateActivity(
+      item.sustained,
+      now,
+      policy.sustainedBucketCapacity,
+      policy.sustainedRefillPerMinute,
+      policy.sustainedConfirmMs,
+    )
+    item.sustained = sustained
+    if (sustained.confirmed) {
+      const penaltyIntervalExpired = now - sustained.lastTriggeredAt >= policy.burstCooldownMs
+      const signal = createSignal(
+        'spam_sustained',
+        'behavior',
+        '长期发送速率异常',
+        `令牌桶持续耗尽超过 ${Math.round(policy.sustainedConfirmMs / 1000)} 秒，长期速率 ${policy.sustainedRefillPerMinute} 条/分钟`,
+        'delete',
+        '长期速率超限',
+      )
+      signal.countsAsOffense = penaltyIntervalExpired
+      signal.writeAudit = penaltyIntervalExpired
+      if (penaltyIntervalExpired) item.sustained.lastTriggeredAt = now
+      signals.push(signal)
+      const log = `长期速率检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，处罚节点 ${penaltyIntervalExpired ? '是' : '否'}`
+      if (penaltyIntervalExpired) logger.info(`触发${log}`)
+      else logger.debug(`持续${log}`)
+    }
+  } else {
+    item.sustained = createSustainedRateActivity(policy.sustainedBucketCapacity, now)
   }
 
   if (updateSimilarRepeatActivity(views.similarityText, now, item, policy)) {
@@ -1893,6 +1951,7 @@ function getSignalRank(code: SignalCode) {
   if (code === 'blacklist_user') return 9
   if (code === 'redline_keyword') return 8
   if (code === 'spam_burst') return 7
+  if (code === 'spam_sustained') return 6
   if (code === 'similar_repeat') return 6
   return 1
 }

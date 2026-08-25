@@ -10,7 +10,7 @@
 - 风险信号：内容、行为和名单检测分别产出信号，再按动作优先级统一裁决。
 - 大词库匹配：关键词使用 Aho-Corasick 自动机，单次扫描可匹配多条规则。
 - 反绕过归一化：处理全半角、大小写、零宽字符、空白、标点、重复字符和部分常见混淆写法。
-- 行为治理：支持可调的瞬时刷屏，以及 Bigram Dice 优先、编辑距离兜底的长窗口相似复读检测；刷屏采用滑动窗口、状态转换和处罚冷却，持续刷屏只拦截不重复累计违规。
+- 行为治理：支持瞬时刷屏、长期令牌桶速率检测，以及 Bigram Dice 优先、编辑距离兜底的长窗口相似复读检测；刷屏采用滑动窗口、状态转换和处罚冷却。
 - 异步 AI 队列：有界并发、超时、重试和消息级幂等，不阻塞消息主链路。
 - 多级处罚：可自由配置处罚级数、触发次数、警告/禁言/踢出动作、禁言时长和逐级提醒模板。
 - 群级隔离：规则、黑白名单、行为状态和违规状态均按群隔离。
@@ -64,6 +64,7 @@ kick > mute > delete > warn > silent
 | `governancePreset` | `balanced` | 治理强度：`relaxed`、`balanced`、`strict`、`custom` |
 | `punishmentLevels` | 3 级 | 多级累计处罚配置，最多 10 级；留空可关闭累计处罚 |
 | `burstDetectionEnabled` | `true` | 启用瞬时刷屏检测 |
+| `sustainedRateDetectionEnabled` | `true` | 启用长期发送速率检测 |
 | `similarDetectionEnabled` | `true` | 启用相似复读检测 |
 | `auditRetentionDays` | `30` | 审计记录保留天数 |
 
@@ -71,12 +72,12 @@ kick > mute > delete > warn > silent
 
 治理预设：
 
-| 模式 | 瞬时刷屏 | 相似复读 |
-| --- | --- | --- |
-| `relaxed` | 15 秒 10 条 | 5 条，Dice 0.82 / 编辑距离 0.90 |
-| `balanced` | 10 秒 6 条 | 3 条，Dice 0.75 / 编辑距离 0.86 |
-| `strict` | 8 秒 4 条 | 3 条，Dice 0.70 / 编辑距离 0.82 |
-| `custom` | 读取自定义参数 | 读取自定义参数 |
+| 模式 | 瞬时刷屏 | 长期速率 | 相似复读 |
+| --- | --- | --- | --- |
+| `relaxed` | 15 秒 10 条 | 45 条桶，24 条/分钟 | 5 条，Dice 0.82 / 编辑距离 0.90 |
+| `balanced` | 10 秒 6 条 | 30 条桶，18 条/分钟 | 3 条，Dice 0.75 / 编辑距离 0.86 |
+| `strict` | 8 秒 4 条 | 20 条桶，12 条/分钟 | 3 条，Dice 0.70 / 编辑距离 0.82 |
+| `custom` | 读取自定义参数 | 读取自定义参数 | 读取自定义参数 |
 
 处罚阶梯独立于治理预设，在所有模式下都使用 `punishmentLevels`。默认配置为：
 
@@ -105,6 +106,9 @@ kick > mute > delete > warn > silent
 | `burstMessageCount` | 6 | 3～20 | 窗口内触发刷屏的消息数 |
 | `burstCooldownSeconds` | 60 | 10～3600 | 同一轮刷屏重复处罚的冷却时间；冷却期间仍拦截消息 |
 | `burstRecoverySeconds` | 15 | 5～300 | 连续未再次达到阈值后恢复正常状态的时间 |
+| `sustainedBucketCapacity` | 30 | 10～200 | 长期速率令牌桶容量；每条消息消耗一个令牌 |
+| `sustainedRefillPerMinute` | 18 | 1～240 | 令牌补充速度，单位条/分钟 |
+| `sustainedConfirmSeconds` | 20 | 5～300 | 令牌耗尽后持续超速多久才确认长期刷屏 |
 | `similarWindowMinutes` | 60 | 10～1440 | 相似消息统计窗口 |
 | `similarMessageCount` | 3 | 2～10 | 触发相似复读的消息数 |
 | `similarityThreshold` | 0.86 | 0.75～0.95 | 编辑距离相似度阈值 |

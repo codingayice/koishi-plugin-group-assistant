@@ -112,6 +112,24 @@ const moderationSchema = {
     .min(5)
     .max(300)
     .description('自定义模式下，连续多久未再次达到刷屏阈值后恢复正常，单位秒'),
+  sustainedRateDetectionEnabled: Schema.boolean()
+    .default(true)
+    .description('启用长期发送速率检测'),
+  sustainedBucketCapacity: Schema.number()
+    .default(30)
+    .min(10)
+    .max(200)
+    .description('自定义模式下，长期速率令牌桶容量，每条消息消耗一个令牌'),
+  sustainedRefillPerMinute: Schema.number()
+    .default(18)
+    .min(1)
+    .max(240)
+    .description('自定义模式下，长期速率令牌补充速度，单位条/分钟'),
+  sustainedConfirmSeconds: Schema.number()
+    .default(20)
+    .min(5)
+    .max(300)
+    .description('自定义模式下，令牌耗尽后持续超速多久才确认刷屏，单位秒'),
   similarDetectionEnabled: Schema.boolean()
     .default(true)
     .description('启用相似复读检测'),
@@ -181,6 +199,10 @@ export interface Config {
     burstMessageCount?: number
     burstCooldownSeconds?: number
     burstRecoverySeconds?: number
+    sustainedRateDetectionEnabled?: boolean
+    sustainedBucketCapacity?: number
+    sustainedRefillPerMinute?: number
+    sustainedConfirmSeconds?: number
     similarDetectionEnabled?: boolean
     similarWindowMinutes?: number
     similarMessageCount?: number

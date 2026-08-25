@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { calculateBigramDice, isSimilarByEditDistance, isSimilarText } from '../src/similarity'
 import { createBurstActivity, updateBurstActivity } from '../src/spam-detection'
+import { createSustainedRateActivity, updateSustainedRateActivity } from '../src/sustained-rate'
 import { parseWordlist } from '../src/wordlist-import'
 
 test('Bigram Dice 能识别词组换序', () => {
@@ -96,4 +97,33 @@ test('持续高频发送会在冷却结束后再次累计违规', () => {
 
   assert.equal(triggeredCount, 3)
   assert.equal(activity.state, 'active')
+})
+
+test('长期令牌桶允许初始突发并确认持续超速', () => {
+  let activity = createSustainedRateActivity(3, 0)
+  activity = updateSustainedRateActivity(activity, 0, 3, 6, 5_000)
+  activity = updateSustainedRateActivity(activity, 1_000, 3, 6, 5_000)
+  activity = updateSustainedRateActivity(activity, 2_000, 3, 6, 5_000)
+  activity = updateSustainedRateActivity(activity, 3_000, 3, 6, 5_000)
+
+  assert.equal(activity.overLimit, true)
+  assert.equal(activity.confirmed, false)
+
+  const confirmed = updateSustainedRateActivity(activity, 8_000, 3, 6, 5_000)
+  assert.equal(confirmed.overLimit, true)
+  assert.equal(confirmed.confirmed, true)
+})
+
+test('长期速率停止后令牌恢复并结束超速状态', () => {
+  let activity = createSustainedRateActivity(3, 0)
+  activity = updateSustainedRateActivity(activity, 0, 3, 6, 5_000)
+  activity = updateSustainedRateActivity(activity, 1_000, 3, 6, 5_000)
+  activity = updateSustainedRateActivity(activity, 2_000, 3, 6, 5_000)
+  activity = updateSustainedRateActivity(activity, 3_000, 3, 6, 5_000)
+  activity = updateSustainedRateActivity(activity, 8_000, 3, 6, 5_000)
+
+  const recovered = updateSustainedRateActivity(activity, 60_000, 3, 6, 5_000)
+  assert.equal(recovered.overLimit, false)
+  assert.equal(recovered.confirmed, false)
+  assert.equal(recovered.overLimitSince, 0)
 })
