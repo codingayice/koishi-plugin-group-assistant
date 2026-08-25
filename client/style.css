@@ -12,8 +12,10 @@
   --wordlist-danger: var(--k-color-danger, #f56c6c);
   display: flex;
   box-sizing: border-box;
+  width: calc(100% - var(--activity-width, 4rem));
   height: 100%;
   min-height: 100%;
+  margin-left: var(--activity-width, 4rem);
   flex-direction: row;
   overflow: hidden;
   color: var(--wordlist-text);
