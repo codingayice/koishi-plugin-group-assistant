@@ -1227,7 +1227,9 @@ function ruleToSignal(rule: ModerationRule): ModerationSignal {
   return {
     code,
     source: 'content',
-    publicReason: sensitive ? '消息内容待复核' : '消息内容违反群规',
+    publicReason: sensitive
+      ? `消息内容待复核，命中：${rule.pattern}`
+      : `消息内容违反群规，命中：${rule.pattern}`,
     evidence: `命中${formatScope(rule.scope)}关键词 #${rule.id}`,
     pattern: rule.pattern,
     action: sensitive ? 'silent' : 'delete',
@@ -1515,9 +1517,14 @@ async function processAiReviewJob(
       }
 
       const primary = job.signals[0]
+      const matchedPatterns = job.signals
+        .map((signal) => signal.pattern)
+        .filter(Boolean)
+        .join('、')
+        .slice(0, 500)
       const confirmedSignal: ModerationSignal = {
         ...primary,
-        publicReason: '消息内容经复核违反群规',
+        publicReason: `消息内容经复核违反群规${matchedPatterns ? `，命中：${matchedPatterns}` : ''}`,
         evidence: `AI 确认违规：${result.category}`,
         pattern: job.signals.map((signal) => signal.pattern).join('、').slice(0, 500),
         action: 'delete',
@@ -1677,7 +1684,6 @@ async function sendPunishmentNotice(
   const replacements: Record<string, string> = {
     '{at}': String(h('at', { id: userId })),
     '{reason}': decision.signal.publicReason,
-    '{matched}': formatMatchedSignal(decision.signal),
     '{action}': formatAction(level.action),
     '{muteMinutes}': String(level.action === 'mute' ? level.muteDurationMinutes : 0),
     '{offenseCount}': String(decision.offenseCount),
@@ -1688,11 +1694,6 @@ async function sendPunishmentNotice(
     message = message.split(placeholder).join(value)
   }
   if (message.trim()) await session.send(message)
-}
-
-function formatMatchedSignal(signal: ModerationSignal) {
-  if (signal.source === 'content') return signal.pattern || signal.publicReason
-  return signal.publicReason
 }
 
 async function deleteMessage(session: Session) {

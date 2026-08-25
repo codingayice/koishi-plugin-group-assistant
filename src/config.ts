@@ -79,7 +79,7 @@ const moderationSchema = {
       .description('禁言时长，仅禁言动作生效'),
     messageTemplate: Schema.string()
     .default('')
-    .description('提醒模板，留空则不通知；支持 {at}、{reason}、{matched}、{action}、{muteMinutes}、{offenseCount}、{level}'),
+    .description('提醒模板，留空则不通知；支持 {at}、{reason}、{action}、{muteMinutes}、{offenseCount}、{level}'),
   }))
     .default(DEFAULT_PUNISHMENT_LEVELS)
     .max(10)
