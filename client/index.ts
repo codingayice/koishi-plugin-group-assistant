@@ -936,13 +936,13 @@ const WordlistPage = defineComponent({
         h('button', { class: 'console-button primary filter-submit', type: 'button', disabled: auditLoading.value, onClick: applyAuditFilters }, '筛选'),
       ]),
       h('section', { class: 'audit-table' }, [
-        h('div', { class: 'audit-table-head' }, ['时间', '用户', '信号', '关键词', '处置', '状态', '操作'].map((label) => h('span', label))),
+        h('div', { class: 'audit-table-head' }, ['时间', '用户', '信号', '消息内容', '处置', '状态', '操作'].map((label) => h('span', label))),
         audits.value.length
           ? audits.value.map((record) => h('div', { class: 'audit-row', key: record.id }, [
             h('span', { title: record.createdAt }, formatDateTime(record.createdAt)),
             h('span', { title: record.userId }, record.userId),
             h('span', { title: record.signalCode }, SIGNAL_LABELS[record.signalCode] || record.signalCode),
-            h('span', { class: 'audit-pattern', title: record.pattern }, record.pattern || '无'),
+            h('span', { class: 'audit-pattern', title: record.content }, record.content || '无'),
             h('span', ACTION_LABELS[record.action] || record.action),
             h('span', { class: ['status-badge', `status-${record.status}`] }, STATUS_LABELS[record.status] || record.status),
             h('span', { class: 'audit-operation' }, [h('button', {
