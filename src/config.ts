@@ -130,38 +130,6 @@ const moderationSchema = {
     .min(5)
     .max(300)
     .description('自定义模式下，令牌耗尽后持续超速多久才确认刷屏，单位秒'),
-  similarDetectionEnabled: Schema.boolean()
-    .default(true)
-    .description('启用相似复读检测'),
-  similarWindowMinutes: Schema.number()
-    .default(60)
-    .min(10)
-    .max(1440)
-    .description('自定义模式下，相似消息统计窗口，单位分钟'),
-  similarMessageCount: Schema.number()
-    .default(3)
-    .min(2)
-    .max(10)
-    .description('自定义模式下，达到该相似消息数时判定复读'),
-  similarityThreshold: Schema.number()
-    .default(0.86)
-    .min(0.75)
-    .max(0.95)
-    .step(0.01)
-    .role('slider')
-    .description('自定义模式下，编辑距离相似度阈值'),
-  diceSimilarityThreshold: Schema.number()
-    .default(0.75)
-    .min(0.6)
-    .max(0.95)
-    .step(0.01)
-    .role('slider')
-    .description('自定义模式下，字符 Bigram Dice 相似度阈值'),
-  similarMinLength: Schema.number()
-    .default(10)
-    .min(4)
-    .max(50)
-    .description('自定义模式下，参与相似检测的最短文本长度'),
   auditRetentionDays: Schema.number()
     .default(30)
     .min(1)
@@ -203,12 +171,6 @@ export interface Config {
     sustainedBucketCapacity?: number
     sustainedRefillPerMinute?: number
     sustainedConfirmSeconds?: number
-    similarDetectionEnabled?: boolean
-    similarWindowMinutes?: number
-    similarMessageCount?: number
-    similarityThreshold?: number
-    diceSimilarityThreshold?: number
-    similarMinLength?: number
     auditRetentionDays?: number
   }
   deepseek: {

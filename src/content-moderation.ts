@@ -7,7 +7,6 @@ import {
   PunishmentAction,
   PunishmentLevelConfig,
 } from './config'
-import { isSimilarText } from './similarity'
 import { createBurstActivity, updateBurstActivity } from './spam-detection'
 import type { BurstActivity } from './spam-detection'
 import { createSustainedRateActivity, updateSustainedRateActivity } from './sustained-rate'
@@ -25,7 +24,6 @@ type SignalCode =
   | 'sensitive_keyword'
   | 'spam_burst'
   | 'spam_sustained'
-  | 'similar_repeat'
   | 'manual_action'
 
 declare module 'koishi' {
@@ -96,7 +94,6 @@ type FlatConfig = Config['base'] & Config['moderation'] & Config['deepseek']
 interface MessageViews {
   rawText: string
   keywordText: string
-  similarityText: string
 }
 
 interface ModerationSignal {
@@ -161,13 +158,7 @@ interface AcNode {
 interface MessageActivity {
   burst: BurstActivity
   sustained: SustainedRateActivity
-  similarHistory: SimilarMessage[]
   updatedAt: number
-}
-
-interface SimilarMessage {
-  normalized: string
-  createdAt: number
 }
 
 interface ResolvedPolicy {
@@ -180,12 +171,6 @@ interface ResolvedPolicy {
   sustainedBucketCapacity: number
   sustainedRefillPerMinute: number
   sustainedConfirmMs: number
-  similarDetectionEnabled: boolean
-  similarWindowMs: number
-  similarMessageCount: number
-  similarityThreshold: number
-  diceSimilarityThreshold: number
-  similarMinLength: number
   offenseWindowMs: number
   punishmentLevels: ResolvedPunishmentLevel[]
 }
@@ -202,7 +187,6 @@ type GovernancePreset = Exclude<NonNullable<FlatConfig['governancePreset']>, 'cu
 
 const INTERNAL_POLICY = {
   ruleCacheMs: 30_000,
-  similarHistoryLimit: 20,
   aiTimeoutMs: 8_000,
   aiRetries: 2,
   aiQueueConcurrency: 2,
@@ -216,7 +200,6 @@ const INTERNAL_POLICY = {
 
 const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
   | 'burstDetectionEnabled'
-  | 'similarDetectionEnabled'
   | 'sustainedRateDetectionEnabled'
   | 'punishmentLevels'
 >> = {
@@ -228,11 +211,6 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     sustainedBucketCapacity: 45,
     sustainedRefillPerMinute: 24,
     sustainedConfirmMs: 30_000,
-    similarWindowMs: 60 * 60_000,
-    similarMessageCount: 5,
-    similarityThreshold: 0.90,
-    diceSimilarityThreshold: 0.82,
-    similarMinLength: 10,
     offenseWindowMs: 24 * 60 * 60_000,
   },
   balanced: {
@@ -243,11 +221,6 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     sustainedBucketCapacity: 30,
     sustainedRefillPerMinute: 18,
     sustainedConfirmMs: 20_000,
-    similarWindowMs: 60 * 60_000,
-    similarMessageCount: 3,
-    similarityThreshold: 0.86,
-    diceSimilarityThreshold: 0.75,
-    similarMinLength: 10,
     offenseWindowMs: 24 * 60 * 60_000,
   },
   strict: {
@@ -258,11 +231,6 @@ const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
     sustainedBucketCapacity: 20,
     sustainedRefillPerMinute: 12,
     sustainedConfirmMs: 15_000,
-    similarWindowMs: 60 * 60_000,
-    similarMessageCount: 3,
-    similarityThreshold: 0.82,
-    diceSimilarityThreshold: 0.70,
-    similarMinLength: 8,
     offenseWindowMs: 24 * 60 * 60_000,
   },
 }
@@ -279,11 +247,6 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
         sustainedBucketCapacity: clampInteger(config.sustainedBucketCapacity ?? 30, 10, 200),
         sustainedRefillPerMinute: clampInteger(config.sustainedRefillPerMinute ?? 18, 1, 240),
         sustainedConfirmMs: clampInteger(config.sustainedConfirmSeconds ?? 20, 5, 300) * 1000,
-        similarWindowMs: clampInteger(config.similarWindowMinutes ?? 60, 10, 1440) * 60_000,
-        similarMessageCount: clampInteger(config.similarMessageCount ?? 3, 2, 10),
-        similarityThreshold: clampNumber(config.similarityThreshold ?? 0.86, 0.75, 0.95),
-        diceSimilarityThreshold: clampNumber(config.diceSimilarityThreshold ?? 0.75, 0.6, 0.95),
-        similarMinLength: clampInteger(config.similarMinLength ?? 10, 4, 50),
         offenseWindowMs: clampInteger(config.offenseWindowHours ?? 24, 1, 168) * 60 * 60_000,
       }
     : PRESET_POLICIES[preset]
@@ -292,7 +255,6 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
     ...strategy,
     burstDetectionEnabled: config.burstDetectionEnabled !== false,
     sustainedRateDetectionEnabled: config.sustainedRateDetectionEnabled !== false,
-    similarDetectionEnabled: config.similarDetectionEnabled !== false,
     punishmentLevels: resolvePunishmentLevels(config.punishmentLevels),
   }
 }
@@ -384,7 +346,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         ))
       }
 
-      signals.push(...detectBehaviorSignals(session, views, activity, policy))
+      signals.push(...detectBehaviorSignals(session, activity, policy))
       const ruleIndex = await getRuleIndex(ctx, cache)
       signals.push(...findContentSignals(ruleIndex, session.guildId, views))
 
@@ -1274,7 +1236,6 @@ function ruleToSignal(rule: ModerationRule): ModerationSignal {
 
 function detectBehaviorSignals(
   session: Session,
-  views: MessageViews,
   activity: Map<string, MessageActivity>,
   policy: ResolvedPolicy,
 ) {
@@ -1285,7 +1246,6 @@ function detectBehaviorSignals(
   const item = activity.get(key) || {
     burst: createBurstActivity(),
     sustained: createSustainedRateActivity(policy.sustainedBucketCapacity, now),
-    similarHistory: [],
     updatedAt: now,
   }
   item.updatedAt = now
@@ -1352,54 +1312,9 @@ function detectBehaviorSignals(
     item.sustained = createSustainedRateActivity(policy.sustainedBucketCapacity, now)
   }
 
-  if (updateSimilarRepeatActivity(views.similarityText, now, item, policy)) {
-    const minutes = Math.round(policy.similarWindowMs / 60_000)
-    signals.push(createSignal(
-      'similar_repeat',
-      'behavior',
-      '重复发送相似内容',
-      `${minutes} 分钟内达到 ${policy.similarMessageCount} 条相似消息，Dice 阈值 ${policy.diceSimilarityThreshold}，编辑距离阈值 ${policy.similarityThreshold}`,
-      'delete',
-      '相似复读',
-    ))
-    logger.info(`触发相似复读检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口 ${minutes} 分钟`)
-  }
-
   activity.delete(key)
   activity.set(key, item)
   return signals
-}
-
-function updateSimilarRepeatActivity(
-  normalized: string,
-  now: number,
-  item: MessageActivity,
-  policy: ResolvedPolicy,
-) {
-  if (!policy.similarDetectionEnabled) {
-    item.similarHistory = []
-    return false
-  }
-
-  item.similarHistory = item.similarHistory.filter((message) => {
-    return now - message.createdAt <= policy.similarWindowMs
-  })
-
-  if (normalized.length < policy.similarMinLength) {
-    item.similarHistory = item.similarHistory.slice(-INTERNAL_POLICY.similarHistoryLimit)
-    return false
-  }
-
-  const similarCount = item.similarHistory.filter((message) => {
-    return isSimilarText(normalized, message.normalized, {
-      dice: policy.diceSimilarityThreshold,
-      edit: policy.similarityThreshold,
-    })
-  }).length + 1
-
-  item.similarHistory.push({ normalized, createdAt: now })
-  item.similarHistory = item.similarHistory.slice(-INTERNAL_POLICY.similarHistoryLimit)
-  return similarCount >= policy.similarMessageCount
 }
 
 function pruneActivity(activity: Map<string, MessageActivity>, now: number) {
@@ -1860,7 +1775,6 @@ function createMessageViews(content: string): MessageViews {
   return {
     rawText: content,
     keywordText: normalizeForKeyword(plainText),
-    similarityText: normalizeForSimilarity(plainText),
   }
 }
 
@@ -1874,19 +1788,8 @@ function extractPlainText(content: string) {
   }
 }
 
-function normalizeUnicode(content: string) {
-  return content.normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-}
-
 function normalizeForKeyword(content: string) {
   return normalizeWordlistPattern(content)
-}
-
-function normalizeForSimilarity(content: string) {
-  let normalized = normalizeUnicode(content).toLowerCase()
-  normalized = normalized.replace(/https?:\/\/\S+/gi, ' url ')
-  normalized = normalized.replace(/\d+/g, ' num ')
-  return normalizeForKeyword(normalized)
 }
 
 function parseRuleScope(value: unknown): RuleScope | null {
@@ -1952,7 +1855,6 @@ function getSignalRank(code: SignalCode) {
   if (code === 'redline_keyword') return 8
   if (code === 'spam_burst') return 7
   if (code === 'spam_sustained') return 6
-  if (code === 'similar_repeat') return 6
   return 1
 }
 
