@@ -4,6 +4,17 @@ import './style.css'
 
 const MAX_WORDLIST_BYTES = 2 * 1024 * 1024
 
+type RuleScope = 'redline' | 'sensitive'
+
+interface RuleRecord {
+  id: number
+  guildId: string
+  scope: RuleScope
+  pattern: string
+  enabled: boolean
+  createdAt: string
+}
+
 function encodeBase64(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer)
   let binary = ''
@@ -20,6 +31,11 @@ function formatFileSize(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`
 }
 
+function formatRuleDate(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { hour12: false })
+}
+
 const WordlistImportPage = defineComponent({
   setup() {
     const guildId = ref('')
@@ -30,9 +46,20 @@ const WordlistImportPage = defineComponent({
     const status = ref('等待选择词库文件。')
     const statusTone = ref<'idle' | 'working' | 'success' | 'error'>('idle')
     const jobId = ref('')
+    const rules = ref<RuleRecord[]>([])
+    const ruleFilter = ref<'all' | RuleScope>('all')
+    const rulePattern = ref('')
+    const rulesLoading = ref(false)
+    const rulesStatus = ref('填写群号后刷新规则列表。')
+    const editingRuleId = ref<number>()
+    const editingPattern = ref('')
+    const editingScope = ref<RuleScope>('sensitive')
 
     const fileSize = computed(() => selectedFile.value ? formatFileSize(selectedFile.value.size) : '')
     const scopeLabel = computed(() => scope.value === 'redline' ? '红线词库' : '敏感词库')
+    const visibleRules = computed(() => ruleFilter.value === 'all'
+      ? rules.value
+      : rules.value.filter((rule) => rule.scope === ruleFilter.value))
 
     receive('group-assistant/import-progress', (data: { jobId?: string; message?: string }) => {
       if (data?.jobId !== jobId.value || !data.message) return
@@ -61,6 +88,172 @@ const WordlistImportPage = defineComponent({
       dragging.value = false
       if (busy.value) return
       setFile(event.dataTransfer?.files?.[0])
+    }
+
+    const loadRules = async () => {
+      const targetGuildId = guildId.value.trim()
+      if (!targetGuildId) {
+        rules.value = []
+        rulesStatus.value = '请先填写目标群号。'
+        return
+      }
+      rulesLoading.value = true
+      rulesStatus.value = '正在读取规则列表。'
+      try {
+        const result = await send('group-assistant/list-rules', {
+          guildId: targetGuildId,
+          scope: ruleFilter.value === 'all' ? undefined : ruleFilter.value,
+        })
+        rules.value = Array.isArray(result) ? result as RuleRecord[] : []
+        rulesStatus.value = `已加载 ${rules.value.length} 条规则。`
+      } catch (error) {
+        rulesStatus.value = `读取失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        rulesLoading.value = false
+      }
+    }
+
+    const createRule = async () => {
+      const targetGuildId = guildId.value.trim()
+      const pattern = rulePattern.value.trim()
+      if (!targetGuildId) {
+        rulesStatus.value = '请先填写目标群号。'
+        return
+      }
+      if (!pattern) {
+        rulesStatus.value = '请输入要添加的关键词。'
+        return
+      }
+      rulesLoading.value = true
+      rulesStatus.value = '正在创建规则。'
+      try {
+        await send('group-assistant/create-rule', {
+          guildId: targetGuildId,
+          scope: scope.value,
+          pattern,
+        })
+        rulePattern.value = ''
+        rulesStatus.value = '规则创建成功。'
+        await loadRules()
+      } catch (error) {
+        rulesStatus.value = `创建失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        rulesLoading.value = false
+      }
+    }
+
+    const beginEdit = (rule: RuleRecord) => {
+      editingRuleId.value = rule.id
+      editingPattern.value = rule.pattern
+      editingScope.value = rule.scope
+    }
+
+    const cancelEdit = () => {
+      editingRuleId.value = undefined
+      editingPattern.value = ''
+    }
+
+    const saveEdit = async (rule: RuleRecord) => {
+      const targetGuildId = guildId.value.trim()
+      const pattern = editingPattern.value.trim()
+      if (!pattern) {
+        rulesStatus.value = '规则内容不能为空。'
+        return
+      }
+      rulesLoading.value = true
+      rulesStatus.value = `正在更新规则 #${rule.id}。`
+      try {
+        await send('group-assistant/update-rule', {
+          guildId: targetGuildId,
+          id: rule.id,
+          scope: editingScope.value,
+          pattern,
+          enabled: rule.enabled,
+        })
+        cancelEdit()
+        rulesStatus.value = '规则更新成功。'
+        await loadRules()
+      } catch (error) {
+        rulesStatus.value = `更新失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        rulesLoading.value = false
+      }
+    }
+
+    const toggleRule = async (rule: RuleRecord) => {
+      const targetGuildId = guildId.value.trim()
+      rulesLoading.value = true
+      rulesStatus.value = `${rule.enabled ? '正在禁用' : '正在启用'}规则 #${rule.id}。`
+      try {
+        await send('group-assistant/update-rule', {
+          guildId: targetGuildId,
+          id: rule.id,
+          scope: rule.scope,
+          pattern: rule.pattern,
+          enabled: !rule.enabled,
+        })
+        rulesStatus.value = `规则 #${rule.id} 已${rule.enabled ? '禁用' : '启用'}。`
+        await loadRules()
+      } catch (error) {
+        rulesStatus.value = `更新失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        rulesLoading.value = false
+      }
+    }
+
+    const deleteRule = async (rule: RuleRecord) => {
+      if (!window.confirm(`确定删除规则 #${rule.id}「${rule.pattern}」吗？`)) return
+      rulesLoading.value = true
+      rulesStatus.value = `正在删除规则 #${rule.id}。`
+      try {
+        await send('group-assistant/delete-rule', {
+          guildId: guildId.value.trim(),
+          id: rule.id,
+        })
+        rulesStatus.value = `规则 #${rule.id} 已删除。`
+        await loadRules()
+      } catch (error) {
+        rulesStatus.value = `删除失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        rulesLoading.value = false
+      }
+    }
+
+    const renderRuleRow = (rule: RuleRecord) => {
+      const editing = editingRuleId.value === rule.id
+      return h('div', { class: ['rule-row', { disabled: !rule.enabled, editing }], key: rule.id }, [
+        h('span', { class: 'rule-id' }, `#${rule.id}`),
+        editing
+          ? h('input', {
+            class: 'rule-edit-input',
+            value: editingPattern.value,
+            disabled: rulesLoading.value,
+            onInput: (event: Event) => { editingPattern.value = (event.target as HTMLInputElement).value },
+            onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void saveEdit(rule) },
+          })
+          : h('span', { class: 'rule-pattern', title: rule.pattern }, rule.pattern),
+        editing
+          ? h('select', {
+            class: 'rule-scope-select',
+            value: editingScope.value,
+            disabled: rulesLoading.value,
+            onChange: (event: Event) => { editingScope.value = (event.target as HTMLSelectElement).value as RuleScope },
+          }, [
+            h('option', { value: 'sensitive' }, '敏感'),
+            h('option', { value: 'redline' }, '红线'),
+          ])
+          : h('span', { class: ['rule-scope', rule.scope] }, rule.scope === 'redline' ? '红线' : '敏感'),
+        h('span', { class: ['rule-state', rule.enabled ? 'enabled' : 'disabled'] }, rule.enabled ? '启用' : '停用'),
+        h('span', { class: 'rule-date' }, formatRuleDate(rule.createdAt)),
+        h('div', { class: 'rule-actions' }, editing ? [
+          h('button', { class: 'text-button primary', type: 'button', disabled: rulesLoading.value, onClick: () => void saveEdit(rule) }, '保存'),
+          h('button', { class: 'text-button', type: 'button', disabled: rulesLoading.value, onClick: cancelEdit }, '取消'),
+        ] : [
+          h('button', { class: 'text-button', type: 'button', disabled: rulesLoading.value, onClick: () => beginEdit(rule) }, '编辑'),
+          h('button', { class: 'text-button', type: 'button', disabled: rulesLoading.value, onClick: () => void toggleRule(rule) }, rule.enabled ? '停用' : '启用'),
+          h('button', { class: 'text-button danger', type: 'button', disabled: rulesLoading.value, onClick: () => void deleteRule(rule) }, '删除'),
+        ]),
+      ])
     }
 
     const submit = async () => {
@@ -102,6 +295,7 @@ const WordlistImportPage = defineComponent({
         })
         status.value = String(result || `${scopeLabel.value}导入完成。`)
         statusTone.value = 'success'
+        await loadRules()
       } catch (error) {
         status.value = `导入失败：${error instanceof Error ? error.message : String(error)}`
         statusTone.value = 'error'
@@ -116,8 +310,8 @@ const WordlistImportPage = defineComponent({
           h('span', { class: 'kicker-line' }),
           h('span', '群聊治理 / 规则资产'),
         ]),
-        h('h1', '词库导入'),
-        h('p', '把可复用的治理词库安全地加入指定群，导入后立即参与消息检测。'),
+        h('h1', '词库与规则'),
+        h('p', '在一个工作台里导入词库，并维护指定群正在使用的治理规则。'),
       ]),
       h('section', { class: 'process-strip', 'aria-label': '导入流程' }, [
         h('div', { class: 'process-step active' }, [
@@ -230,6 +424,70 @@ const WordlistImportPage = defineComponent({
             h('span', { class: 'button-icon' }, busy.value ? '...' : '↑'),
             h('span', busy.value ? '正在导入' : '上传并导入'),
           ]),
+        ]),
+      ]),
+      h('section', { class: 'rules-panel panel' }, [
+        h('div', { class: 'rules-heading' }, [
+          h('div', { class: 'panel-heading' }, [
+            h('div', { class: 'panel-index' }, 'C'),
+            h('div', [
+              h('h2', '规则管理'),
+              h('p', '在这里完成新增、查询、编辑、启用和删除。'),
+            ]),
+          ]),
+          h('button', {
+            class: 'refresh-button',
+            type: 'button',
+            disabled: rulesLoading.value,
+            onClick: () => void loadRules(),
+          }, rulesLoading.value ? '读取中...' : '刷新列表'),
+        ]),
+        h('div', { class: 'rule-create-bar' }, [
+          h('input', {
+            class: 'rule-create-input',
+            value: rulePattern.value,
+            placeholder: `添加${scopeLabel.value}关键词`,
+            disabled: rulesLoading.value,
+            onInput: (event: Event) => { rulePattern.value = (event.target as HTMLInputElement).value },
+            onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') void createRule() },
+          }),
+          h('span', { class: ['current-scope', scope.value] }, scopeLabel.value),
+          h('button', {
+            class: 'create-button',
+            type: 'button',
+            disabled: rulesLoading.value,
+            onClick: () => void createRule(),
+          }, '+ 添加规则'),
+        ]),
+        h('div', { class: 'rules-toolbar' }, [
+          h('span', { class: 'rules-count' }, `共 ${visibleRules.value.length} 条`),
+          h('span', { class: 'rules-status' }, rulesStatus.value),
+          h('select', {
+            class: 'filter-select',
+            value: ruleFilter.value,
+            disabled: rulesLoading.value,
+            onChange: (event: Event) => { ruleFilter.value = (event.target as HTMLSelectElement).value as typeof ruleFilter.value; void loadRules() },
+          }, [
+            h('option', { value: 'all' }, '全部分类'),
+            h('option', { value: 'sensitive' }, '仅敏感'),
+            h('option', { value: 'redline' }, '仅红线'),
+          ]),
+        ]),
+        h('div', { class: 'rules-table' }, [
+          h('div', { class: 'rules-table-head' }, [
+            h('span', '编号'),
+            h('span', '关键词'),
+            h('span', '分类'),
+            h('span', '状态'),
+            h('span', '创建时间'),
+            h('span', '操作'),
+          ]),
+          visibleRules.value.length
+            ? visibleRules.value.map(renderRuleRow)
+            : h('div', { class: 'rules-empty' }, [
+              h('strong', guildId.value.trim() ? '暂无规则' : '先填写目标群号'),
+              h('span', guildId.value.trim() ? '可以从上方添加关键词，或上传词库文件。' : '填写群号后点击“刷新列表”查看规则。'),
+            ]),
         ]),
       ]),
       h('section', { class: ['status-panel', `status-${statusTone.value}`], 'aria-live': 'polite' }, [

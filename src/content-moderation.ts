@@ -309,7 +309,6 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     INTERNAL_POLICY.aiQueueLimit,
   )
 
-  registerRuleCommands(ctx, config, clearCache)
   registerAuditCommand(ctx, config)
   registerOffenseCommand(ctx, config, policy)
   registerAccessListCommands(ctx, config)
@@ -443,63 +442,6 @@ function extendTables(ctx: Context) {
   }, { autoInc: true })
 }
 
-function registerRuleCommands(ctx: Context, config: FlatConfig, clearCache: () => void) {
-  ctx.command('规则', '管理本群红线与敏感规则')
-    .action(() => '用法：规则 添加/批量添加 <红线|敏感>；规则 删除/启用/禁用 <ID>；规则 列表 [红线|敏感]')
-
-  ctx.command('规则.添加 <scope:string> <pattern:text>', '添加群治理关键词')
-    .action(async ({ session }, scopeInput, pattern) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
-
-      const scope = parseRuleScope(scopeInput)
-      if (!scope) return '规则分类只能是“红线”或“敏感”。'
-      return createRule(ctx, session, scope, pattern || '', clearCache)
-    })
-
-  ctx.command('规则.批量添加 <scope:string> <content:text>', '批量添加群治理关键词')
-    .action(async ({ session }, scopeInput, content) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
-
-      const scope = parseRuleScope(scopeInput)
-      if (!scope) return '规则分类只能是“红线”或“敏感”。'
-      if (!content?.trim()) return '请在命令后粘贴一行一个关键词的内容。'
-      return importWordlist(ctx, session, scope, content, clearCache, createImportProgressReporter(session))
-    })
-
-  ctx.command('规则.删除 <id:number>', '删除群治理规则')
-    .action(async ({ session }, id) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
-      return removeRule(ctx, Number(id), session, clearCache)
-    })
-
-  ctx.command('规则.启用 <id:number>', '启用群治理规则')
-    .action(async ({ session }, id) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
-      return setRuleEnabled(ctx, Number(id), true, session, clearCache)
-    })
-
-  ctx.command('规则.禁用 <id:number>', '禁用群治理规则')
-    .action(async ({ session }, id) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限管理群治理规则。'
-      return setRuleEnabled(ctx, Number(id), false, session, clearCache)
-    })
-
-  ctx.command('规则.列表 [scope:string]', '查看本群治理规则')
-    .action(async ({ session }, scopeInput) => {
-      if (!session) return
-      if (!isPrivileged(session, config)) return '你没有权限查看群治理规则。'
-      const scope = scopeInput ? parseRuleScope(scopeInput) : undefined
-      if (scopeInput && !scope) return '规则分类只能是“红线”或“敏感”。'
-      return showRules(ctx, session, scope)
-    })
-
-}
-
 interface RuleImportTarget {
   guildId?: string
   userId?: string
@@ -516,6 +458,24 @@ interface ConsoleImportPayload {
   filename?: unknown
   content?: unknown
   jobId?: unknown
+}
+
+interface ConsoleRulePayload {
+  guildId?: unknown
+  scope?: unknown
+  pattern?: unknown
+  id?: unknown
+  enabled?: unknown
+}
+
+interface ConsoleRuleRecord {
+  id: number
+  guildId: string
+  scope: RuleScope
+  pattern: string
+  enabled: boolean
+  createdBy: string
+  createdAt: string
 }
 
 interface ConsoleClientLike {
@@ -568,7 +528,69 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void) {
         reportProgress,
       )
     }, { authority: 4 })
+
+    console.addListener('group-assistant/list-rules', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const scope = parseRuleScope(payload?.scope)
+      if (payload?.scope != null && payload.scope !== '' && !scope) {
+        throw new Error('词库分类只能是红线或敏感。')
+      }
+      const query: Partial<ModerationRule> = { guildId: target.guildId }
+      if (scope) query.scope = scope
+      const rules = await ctx.database.get('group-moderation-rule', query)
+      return rules
+        .filter((rule) => isRuleScope(rule.scope))
+        .sort((left, right) => left.id - right.id)
+        .map(toConsoleRuleRecord)
+    }, { authority: 4 })
+
+    console.addListener('group-assistant/create-rule', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const scope = parseRuleScope(payload?.scope)
+      if (!scope) throw new Error('词库分类只能是红线或敏感。')
+      if (typeof payload?.pattern !== 'string') throw new Error('请输入关键词。')
+      return createRule(ctx, target, scope, payload.pattern, clearCache)
+    }, { authority: 4 })
+
+    console.addListener('group-assistant/update-rule', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const id = parseConsoleRuleId(payload?.id)
+      const scope = parseRuleScope(payload?.scope)
+      if (!scope) throw new Error('词库分类只能是红线或敏感。')
+      if (typeof payload?.pattern !== 'string') throw new Error('请输入关键词。')
+      if (typeof payload?.enabled !== 'boolean') throw new Error('规则启用状态无效。')
+      return updateRule(ctx, id, target, scope, payload.pattern, payload.enabled, clearCache)
+    }, { authority: 4 })
+
+    console.addListener('group-assistant/delete-rule', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      return removeRule(ctx, parseConsoleRuleId(payload?.id), target, clearCache)
+    }, { authority: 4 })
   })
+}
+
+function getConsoleRuleTarget(payload: ConsoleRulePayload): RuleImportTarget {
+  const guildId = typeof payload?.guildId === 'string' ? payload.guildId.trim() : ''
+  if (!guildId) throw new Error('请提供目标群号。')
+  return { guildId, userId: 'console' }
+}
+
+function parseConsoleRuleId(value: unknown) {
+  const id = typeof value === 'number' ? value : Number(value)
+  if (!Number.isInteger(id) || id <= 0) throw new Error('规则 ID 无效。')
+  return id
+}
+
+function toConsoleRuleRecord(rule: ModerationRule): ConsoleRuleRecord {
+  return {
+    id: rule.id,
+    guildId: rule.guildId,
+    scope: rule.scope,
+    pattern: rule.pattern,
+    enabled: rule.enabled,
+    createdBy: rule.createdBy,
+    createdAt: rule.createdAt,
+  }
 }
 
 type ImportProgressReporter = (message: string) => Promise<void>
@@ -662,10 +684,6 @@ async function importWordlist(
   return `${formatScope(scope)}词库导入完成：读取 ${parsed.readCount} 条，新增 ${createdCount} 条，重复 ${duplicateCount} 条，无效 ${parsed.invalidCount} 条${failure}。`
 }
 
-function createImportProgressReporter(session: Session): ImportProgressReporter {
-  return (message) => session.send(message).then(() => undefined)
-}
-
 async function reportImportProgress(reporter: ImportProgressReporter | undefined, message: string) {
   if (!reporter) return
   try {
@@ -677,7 +695,7 @@ async function reportImportProgress(reporter: ImportProgressReporter | undefined
 
 async function createRule(
   ctx: Context,
-  session: Session,
+  session: RuleImportTarget,
   scope: RuleScope,
   pattern: string,
   clearCache: () => void,
@@ -711,7 +729,7 @@ async function createRule(
   return `已添加${formatScope(scope)}关键词 #${rule.id}：【${trimmed}】`
 }
 
-async function removeRule(ctx: Context, id: number, session: Session, clearCache: () => void) {
+async function removeRule(ctx: Context, id: number, session: RuleImportTarget, clearCache: () => void) {
   if (!Number.isInteger(id) || id <= 0) return '请提供有效的规则 ID。'
   const [rule] = await ctx.database.get('group-moderation-rule', { id })
   if (!rule) return `规则 #${id} 不存在。`
@@ -723,32 +741,39 @@ async function removeRule(ctx: Context, id: number, session: Session, clearCache
   return `已删除规则 #${id}：【${rule.pattern}】`
 }
 
-async function setRuleEnabled(
+async function updateRule(
   ctx: Context,
   id: number,
+  session: RuleImportTarget,
+  scope: RuleScope,
+  pattern: string,
   enabled: boolean,
-  session: Session,
   clearCache: () => void,
 ) {
-  if (!Number.isInteger(id) || id <= 0) return '请提供有效的规则 ID。'
+  const trimmed = pattern.trim()
+  if (!trimmed) return '规则内容不能为空。'
+  if (!normalizeForKeyword(trimmed)) return '关键词归一化后为空，请输入有效文字。'
+
   const [rule] = await ctx.database.get('group-moderation-rule', { id })
   if (!rule) return `规则 #${id} 不存在。`
   if (rule.guildId !== session.guildId) return '不能修改其他群的规则。'
 
-  await ctx.database.set('group-moderation-rule', { id }, { enabled })
-  clearCache()
-  logger.info(`${enabled ? '启用' : '禁用'}群治理规则：群 ${session.guildId}，规则 ${id}，分类 ${rule.scope}`)
-  return `已${enabled ? '启用' : '禁用'}规则 #${id}：【${rule.pattern}】`
-}
-
-async function showRules(ctx: Context, session: Session, scope?: RuleScope) {
-  const rules = await ctx.database.get('group-moderation-rule', { guildId: session.guildId || '' })
-  const visible = rules.filter((rule) => {
-    if (!isRuleScope(rule.scope)) return false
-    return !scope || rule.scope === scope
+  const existing = await ctx.database.get('group-moderation-rule', {
+    guildId: session.guildId,
+    scope,
   })
-  if (!visible.length) return '当前没有群治理规则。'
-  return visible.map(formatRule).join('\n')
+  const normalized = normalizeForKeyword(trimmed)
+  const duplicate = existing.find((item) => item.id !== id && normalizeForKeyword(item.pattern) === normalized)
+  if (duplicate) return `规则已存在：#${duplicate.id}`
+
+  await ctx.database.set('group-moderation-rule', { id }, {
+    scope,
+    pattern: trimmed,
+    enabled,
+  })
+  clearCache()
+  logger.info(`更新群治理规则：群 ${session.guildId}，规则 ${id}，分类 ${scope}，状态 ${enabled ? '启用' : '禁用'}`)
+  return `已更新规则 #${id}。`
 }
 
 function registerAuditCommand(ctx: Context, config: FlatConfig) {
@@ -1638,10 +1663,6 @@ function formatAction(action: ModerationAction) {
   if (action === 'mute') return '禁言'
   if (action === 'kick') return '踢出'
   return '记录'
-}
-
-function formatRule(rule: ModerationRule) {
-  return `#${rule.id} [${rule.enabled ? '启用' : '禁用'}] ${formatScope(rule.scope)}/关键词【${rule.pattern}】`
 }
 
 function formatAccessEntry(entry: ModerationAccessEntry) {
