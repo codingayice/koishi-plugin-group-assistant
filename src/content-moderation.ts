@@ -4,6 +4,7 @@ import { $, Context, h, Logger, Query, Session } from 'koishi'
 import {
   Config,
   DEFAULT_PUNISHMENT_LEVELS,
+  FlatConfig,
   ModerationAction,
   PunishmentAction,
   PunishmentLevelConfig,
@@ -108,8 +109,6 @@ export interface ModerationAccessEntry {
   createdAt: string
 }
 
-type FlatConfig = Config['base'] & Config['moderation'] & Config['content'] & Config['behavior'] & Config['deepseek']
-
 interface MessageViews {
   rawText: string
   plainText: string
@@ -150,6 +149,8 @@ interface AiReviewJob {
   auditId: number
   signals: ModerationSignal[]
   content: string
+  config: FlatConfig
+  policy: ResolvedPolicy
 }
 
 interface RuleCache {
@@ -179,6 +180,7 @@ interface AcNode {
 interface MessageActivity {
   burst: BurstActivity
   sustained: SustainedRateActivity
+  policyKey: string
   updatedAt: number
 }
 
@@ -280,6 +282,10 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
   }
 }
 
+function getPolicyKey(policy: ResolvedPolicy) {
+  return JSON.stringify(policy)
+}
+
 function resolvePunishmentLevels(levels: PunishmentLevelConfig[] | undefined): ResolvedPunishmentLevel[] {
   return (levels ?? DEFAULT_PUNISHMENT_LEVELS)
     .slice(0, 10)
@@ -306,9 +312,14 @@ function clampNumber(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value))
 }
 
-export function registerContentModeration(ctx: Context, config: FlatConfig) {
+export function registerContentModeration(
+  ctx: Context,
+  resolveConfig: (guildId: string) => FlatConfig,
+  defaultConfig: FlatConfig,
+  configuredGuildIds: string[] = [],
+) {
   extendTables(ctx)
-  const policy = resolvePolicy(config)
+  const defaultPolicy = resolvePolicy(defaultConfig)
   const activity = new Map<string, MessageActivity>()
   const cache: RuleCache = {
     expiresAt: 0,
@@ -320,32 +331,34 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     logger.debug('已清除群治理规则缓存')
   }
 
-  registerConsoleWordlistImport(ctx, clearCache, policy)
+  registerConsoleWordlistImport(ctx, clearCache, resolveConfig, configuredGuildIds)
 
   const aiQueue = new AiReviewQueue(
-    (job) => processAiReviewJob(ctx, config, policy, job),
+    (job) => processAiReviewJob(ctx, job),
     INTERNAL_POLICY.aiQueueConcurrency,
     INTERNAL_POLICY.aiQueueLimit,
   )
   const spamClassifier = new SpamClassifierManager()
   let spamModelErrorAt = 0
 
-  registerAuditCommand(ctx, config)
-  registerOffenseCommand(ctx, config, policy)
-  registerAccessListCommands(ctx, config)
-  registerManualPunishmentCommands(ctx, config, policy)
+  registerAuditCommand(ctx, resolveConfig)
+  registerOffenseCommand(ctx, resolveConfig)
+  registerAccessListCommands(ctx, resolveConfig)
+  registerManualPunishmentCommands(ctx, resolveConfig)
 
   ctx.setInterval(() => {
-    void pruneExpiredData(ctx, config, policy).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
+    void pruneExpiredData(ctx, resolveConfig).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
   }, 6 * 60 * 60_000)
   ctx.on('dispose', () => {
     aiQueue.dispose()
     spamClassifier.dispose()
   })
-  logger.info(`群治理模块已注册：预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，长期速率 ${policy.sustainedBucketCapacity} 条桶/${policy.sustainedRefillPerMinute} 条每分钟，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
+  logger.info(`群治理模块已注册：默认预设 ${defaultConfig.governancePreset || 'balanced'}，刷屏 ${defaultPolicy.burstWindowMs / 1000} 秒/${defaultPolicy.burstMessageCount} 条，长期速率 ${defaultPolicy.sustainedBucketCapacity} 条桶/${defaultPolicy.sustainedRefillPerMinute} 条每分钟，冷却 ${defaultPolicy.burstCooldownMs / 1000} 秒，恢复 ${defaultPolicy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
   ctx.middleware(async (session, next) => {
-    if (config.enabled === false || !session.guildId || !session.content?.trim()) return next()
+    if (!session.guildId || !session.content?.trim()) return next()
+    const config = resolveConfig(session.guildId)
+    if (config.enabled === false) return next()
     if (isPrivileged(session, config)) {
       logger.debug(`跳过群治理：特权用户，群 ${session.guildId}，用户 ${session.userId || ''}`)
       return next()
@@ -354,6 +367,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     try {
       const guildId = session.guildId
       const userId = session.userId || ''
+      const policy = resolvePolicy(config)
       if (await isUserInAccessList(ctx, guildId, userId, 'whitelist')) {
         logger.debug(`跳过群治理：白名单用户，群 ${guildId}，用户 ${userId}`)
         return next()
@@ -454,7 +468,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
       logger.info(`消息命中治理信号：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}，信号 ${formatSignalCodes(signals)}，确定性 ${deterministicSignals.length}，待 AI ${aiSignals.length}`)
 
       if (aiSignals.length && !hasImmediateContentSignal) {
-        await scheduleAiReview(ctx, config, aiQueue, session, traceId, aiSignals, views.rawText)
+        await scheduleAiReview(ctx, config, policy, aiQueue, session, traceId, aiSignals, views.rawText)
       }
 
       if (!selected) {
@@ -658,7 +672,12 @@ interface ConsoleClientLike {
   send(payload: unknown): void
 }
 
-function registerConsoleWordlistImport(ctx: Context, clearCache: () => void, policy: ResolvedPolicy) {
+function registerConsoleWordlistImport(
+  ctx: Context,
+  clearCache: () => void,
+  resolveConfig: (guildId: string) => FlatConfig,
+  configuredGuildIds: string[],
+) {
   ctx.inject(['console'], (consoleContext) => {
     const console = (consoleContext as Context & { console: ConsoleServiceLike }).console
     console.addEntry({
@@ -713,6 +732,11 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void, pol
         group.ruleCount += 1
         if (rule.enabled) group.enabledCount += 1
         groups.set(rule.guildId, group)
+      }
+      for (const guildId of configuredGuildIds) {
+        if (guildId && !groups.has(guildId)) {
+          groups.set(guildId, { guildId, ruleCount: 0, enabledCount: 0 })
+        }
       }
       return [...groups.values()].sort((left, right) => left.guildId.localeCompare(right.guildId))
     }, { authority: 4 })
@@ -832,7 +856,7 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void, pol
     console.addListener('group-assistant/list-offenses', async (payload: ConsoleRulePayload) => {
       const target = getConsoleRuleTarget(payload)
       const { page, pageSize } = parseConsolePagination(payload)
-      const cutoff = new Date(Date.now() - policy.offenseWindowMs).toISOString()
+      const cutoff = new Date(Date.now() - resolvePolicy(resolveConfig(target.guildId)).offenseWindowMs).toISOString()
       const query: Query<ModerationOffense> = {
         guildId: target.guildId,
         updatedAt: { $gte: cutoff },
@@ -1133,11 +1157,12 @@ async function updateRule(
   return `已更新规则 #${id}。`
 }
 
-function registerAuditCommand(ctx: Context, config: FlatConfig) {
+function registerAuditCommand(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
   ctx.command('违规记录', '查看最近的群治理记录')
     .option('limit', '-n <limit> 查询条数')
     .action(async ({ session, options }) => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
       if (!isPrivileged(session, config)) return '你没有权限查看违规记录。'
 
       const limit = Math.min(Math.max(Number(options.limit) || 10, 1), 30)
@@ -1154,11 +1179,13 @@ function registerAuditCommand(ctx: Context, config: FlatConfig) {
     })
 }
 
-function registerOffenseCommand(ctx: Context, config: FlatConfig, policy: ResolvedPolicy) {
+function registerOffenseCommand(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
   ctx.command('违规用户', '查看本群有效违规状态')
     .option('limit', '-n <limit> 查询条数')
     .action(async ({ session, options }) => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
+      const policy = resolvePolicy(config)
       if (!isPrivileged(session, config)) return '你没有权限查看违规用户。'
 
       const limit = Math.min(Math.max(Number(options.limit) || 10, 1), 30)
@@ -1181,6 +1208,7 @@ function registerOffenseCommand(ctx: Context, config: FlatConfig, policy: Resolv
   ctx.command('违规清零 <userId:string>', '清零指定用户的违规状态')
     .action(async ({ session }, userId) => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
       if (!isPrivileged(session, config)) return '你没有权限清零违规状态。'
       if (!userId) return '请提供要清零的用户 ID。'
 
@@ -1194,20 +1222,21 @@ async function clearOffense(ctx: Context, guildId: string, userId: string) {
   return `已清零用户 ${userId} 的违规状态。`
 }
 
-function registerAccessListCommands(ctx: Context, config: FlatConfig) {
-  registerAccessListCommand(ctx, config, '白名单', 'whitelist')
-  registerAccessListCommand(ctx, config, '黑名单', 'blacklist')
+function registerAccessListCommands(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
+  registerAccessListCommand(ctx, resolveConfig, '白名单', 'whitelist')
+  registerAccessListCommand(ctx, resolveConfig, '黑名单', 'blacklist')
 }
 
 function registerAccessListCommand(
   ctx: Context,
-  config: FlatConfig,
+  resolveConfig: (guildId: string) => FlatConfig,
   commandName: string,
   listType: AccessListType,
 ) {
   ctx.command(`${commandName}.添加 <userId:string> [reason:text]`, `添加${commandName}用户`)
     .action(async ({ session }, userId, reason = '') => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
       if (!isPrivileged(session, config)) return `你没有权限管理${commandName}。`
       if (!session.guildId) return `${commandName}只能在群聊中管理。`
       if (!userId) return '请提供用户 ID。'
@@ -1234,6 +1263,7 @@ function registerAccessListCommand(
   ctx.command(`${commandName}.删除 <userId:string>`, `删除${commandName}用户`)
     .action(async ({ session }, userId) => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
       if (!isPrivileged(session, config)) return `你没有权限管理${commandName}。`
       if (!session.guildId) return `${commandName}只能在群聊中管理。`
 
@@ -1256,6 +1286,7 @@ function registerAccessListCommand(
   ctx.command(`${commandName}.列表`, `查看${commandName}`)
     .action(async ({ session }) => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
       if (!isPrivileged(session, config)) return `你没有权限查看${commandName}。`
 
       const entries = await ctx.database.get('group-moderation-access', {
@@ -1268,10 +1299,12 @@ function registerAccessListCommand(
     })
 }
 
-function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, policy: ResolvedPolicy) {
+function registerManualPunishmentCommands(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
   ctx.command('警告 <userId:string> [reason:text]', '手动警告用户并记录违规')
     .action(async ({ session }, userId, reason = '管理员手动警告') => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
+      const policy = resolvePolicy(config)
       if (!isPrivileged(session, config)) return '你没有权限手动警告用户。'
       if (!userId) return '请提供要警告的用户 ID。'
 
@@ -1294,6 +1327,8 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
     .option('action', '-a <action> 处理动作：warn/delete/mute/kick')
     .action(async ({ session, options }, userId, reason = '管理员手动处罚') => {
       if (!session) return
+      const config = resolveConfig(session.guildId || '')
+      const policy = resolvePolicy(config)
       if (!isPrivileged(session, config)) return '你没有权限手动处罚用户。'
       if (!userId) return '请提供要处罚的用户 ID。'
 
@@ -1392,11 +1427,16 @@ function detectBehaviorSignals(
   const now = Date.now()
   pruneActivity(activity, now)
   const key = `${session.guildId}:${session.userId || 'unknown'}`
-  const item = activity.get(key) || {
-    burst: createBurstActivity(),
-    sustained: createSustainedRateActivity(policy.sustainedBucketCapacity, now),
-    updatedAt: now,
-  }
+  const policyKey = getPolicyKey(policy)
+  const existing = activity.get(key)
+  const item = !existing || existing.policyKey !== policyKey
+    ? {
+        burst: createBurstActivity(),
+        sustained: createSustainedRateActivity(policy.sustainedBucketCapacity, now),
+        policyKey,
+        updatedAt: now,
+      }
+    : existing
   item.updatedAt = now
   if (policy.burstDetectionEnabled) {
     const burst = updateBurstActivity(
@@ -1643,6 +1683,7 @@ async function recordInitialDetectionEvents(ctx: Context, traceId: string, signa
 async function scheduleAiReview(
   ctx: Context,
   config: FlatConfig,
+  policy: ResolvedPolicy,
   queue: AiReviewQueue,
   session: Session,
   traceId: string,
@@ -1669,7 +1710,7 @@ async function scheduleAiReview(
   await recordAuditEvent(ctx, traceId, 'ai_review', combinedSignal, 'pending')
   const audit = await createAudit(ctx, session, decision, 0, 'pending', false, session.userId || '', traceId)
   const key = `${session.guildId}:${session.messageId || `${session.userId}:${Date.now()}`}`
-  const result = queue.enqueue({ key, traceId, session, auditId: audit.id, signals, content })
+  const result = queue.enqueue({ key, traceId, session, auditId: audit.id, signals, content, config, policy })
   logger.info(`提交 AI 复核任务：审计 ${audit.id}，结果 ${result}，信号 ${formatSignalCodes(signals)}`)
   if (result !== 'queued') {
     await updateAiAudit(ctx, audit.id, traceId, {
@@ -1681,10 +1722,9 @@ async function scheduleAiReview(
 
 async function processAiReviewJob(
   ctx: Context,
-  config: FlatConfig,
-  policy: ResolvedPolicy,
   job: AiReviewJob,
 ) {
+  const { config, policy } = job
   let lastError: unknown
   for (let attempt = 0; attempt <= INTERNAL_POLICY.aiRetries; attempt += 1) {
     try {
@@ -2154,28 +2194,31 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
 
-async function pruneExpiredData(ctx: Context, config: FlatConfig, policy: ResolvedPolicy) {
-  const auditCutoff = Date.now() - Math.max(1, config.auditRetentionDays ?? 30) * 24 * 60 * 60_000
+async function pruneExpiredData(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
+  const now = Date.now()
   const audits = await ctx.database.get('group-moderation-audit', {})
   const expiredAuditIds = audits
-    .filter((record) => parseTimestamp(record.createdAt) < auditCutoff)
+    .filter((record) => parseTimestamp(record.createdAt) < now - Math.max(1, resolveConfig(record.guildId).auditRetentionDays ?? 30) * 24 * 60 * 60_000)
     .map((record) => record.id)
   for (const id of expiredAuditIds) {
     await ctx.database.remove('group-moderation-audit', { id })
   }
 
   const events = await ctx.database.get('group-moderation-audit-event', {})
+  const auditTraceIds = new Map(audits.map((record) => [record.traceId, record.guildId]))
   const expiredEventIds = events
-    .filter((record) => parseTimestamp(record.createdAt) < auditCutoff)
+    .filter((record) => {
+      const guildId = auditTraceIds.get(record.traceId) || ''
+      return parseTimestamp(record.createdAt) < now - Math.max(1, resolveConfig(guildId).auditRetentionDays ?? 30) * 24 * 60 * 60_000
+    })
     .map((record) => record.id)
   for (const id of expiredEventIds) {
     await ctx.database.remove('group-moderation-audit-event', { id })
   }
 
-  const offenseCutoff = Date.now() - policy.offenseWindowMs
   const offenses = await ctx.database.get('group-moderation-offense', {})
   const expiredOffenseIds = offenses
-    .filter((record) => parseTimestamp(record.updatedAt) < offenseCutoff)
+    .filter((record) => parseTimestamp(record.updatedAt) < now - resolvePolicy(resolveConfig(record.guildId)).offenseWindowMs)
     .map((record) => record.id)
   for (const id of expiredOffenseIds) {
     await ctx.database.remove('group-moderation-offense', { id })

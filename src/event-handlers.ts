@@ -1,14 +1,20 @@
 import { Context, h, Logger } from 'koishi'
 import { isUserInAccessList } from './content-moderation'
+import type { FlatConfig } from './config'
 
 const logger = new Logger('event-handlers')
 
-export function registerEventHandlers(ctx: Context, config: any) {
+export function registerEventHandlers(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
   // 入群审核
   ctx.on('guild-member-request', async (session) => {
     const guildId = session.guildId || ''
     const userId = session.userId || ''
+    const config = resolveConfig(guildId)
     try {
+      if (config.enabled === false) {
+        logger.debug(`跳过入群审核：群治理已关闭，群 ${guildId}`)
+        return
+      }
       if (await isUserInAccessList(ctx, guildId, userId, 'blacklist')) {
         await session.bot.handleGuildRequest(session.messageId, false)
         logger.info(`入群申请被黑名单拒绝：群 ${guildId}，用户 ${userId}`)
@@ -31,6 +37,8 @@ export function registerEventHandlers(ctx: Context, config: any) {
   // 欢迎新成员
   ctx.on('guild-member-added', async (session) => {
     try {
+      const config = resolveConfig(session.guildId || '')
+      if (config.enabled === false) return
       const welcomeMessage = (config.welcomeMessage || '{username}，欢迎加入本群。')
         .replace('{username}', session.username || session.userId || '')
         .replace('{botName}', config.botName || '')
@@ -44,6 +52,8 @@ export function registerEventHandlers(ctx: Context, config: any) {
   // 退群提示
   ctx.on('guild-member-removed', async (session) => {
     try {
+      const config = resolveConfig(session.guildId || '')
+      if (config.enabled === false) return
       await session.send((config.leaveMessage || '{userId} 退出了群聊。').replace('{userId}', session.userId || ''))
       logger.info(`已发送退群提示：群 ${session.guildId || ''}，用户 ${session.userId || ''}`)
     } catch (err) {

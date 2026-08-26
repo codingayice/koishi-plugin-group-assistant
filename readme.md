@@ -62,7 +62,7 @@ npm install koishi-plugin-group-assistant
 
 ## 配置说明
 
-配置页面按用途分为五组。
+配置页面按用途分为六组。
 
 ### 基础设置
 
@@ -114,6 +114,21 @@ npm install koishi-plugin-group-assistant
 AI 复核用于敏感词模型置信度不足的消息。红线词和刷屏行为由本地治理策略直接处理。
 
 本地模型目录需要包含 ONNX 模型、`config.json` 和 `vocab.txt`。可以从 [chinese_spam_classifier_onnx](https://huggingface.co/app-x/chinese_spam_classifier_onnx) 获取模型文件。
+
+### 群级配置
+
+`groupConfigs` 用于为不同群聊覆盖插件配置。每一项填写群号后，可以分别覆盖基础设置、群治理、内容检测、行为检测和 AI 复核设置；未填写的字段继续使用全局默认值。
+
+例如，只关闭某个群的治理：
+
+```yaml
+groupConfigs:
+  - guildId: '1047767828'
+    moderation:
+      enabled: false
+```
+
+群级配置优先于全局配置。治理关闭后，该群不会执行消息治理、入群审核、欢迎和退群提示；词库和历史记录不会被删除。
 
 ## 处罚模板
 

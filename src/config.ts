@@ -183,6 +183,68 @@ const deepseekSchema = {
     .description('AI 复核模型'),
 }
 
+const groupConfigSchema = Schema.object({
+  guildId: Schema.string()
+    .required()
+    .description('群号'),
+  base: Schema.object({
+    welcomeMessage: Schema.string().description('入群欢迎信息'),
+    leaveMessage: Schema.string().description('退群通知信息'),
+    botName: Schema.string().description('机器人名称'),
+    signal: Schema.string().description('入群同意暗号'),
+    adminUserIds: Schema.array(Schema.string()).description('补充管理员用户 ID'),
+  }).description('基础设置覆盖'),
+  moderation: Schema.object({
+    enabled: Schema.boolean().description('启用群治理'),
+    governancePreset: Schema.union([
+      Schema.const('relaxed').description('宽松'),
+      Schema.const('balanced').description('均衡'),
+      Schema.const('strict').description('严格'),
+      Schema.const('custom').description('自定义'),
+    ]).description('治理强度'),
+    punishmentLevels: Schema.array(Schema.object({
+      offenseCount: Schema.number().min(1).max(100).description('达到该次数后启用本级处罚'),
+      action: Schema.union([
+        Schema.const('warn').description('警告'),
+        Schema.const('mute').description('禁言'),
+        Schema.const('kick').description('踢出'),
+      ]).description('处罚动作'),
+      muteDurationMinutes: Schema.number().min(1).max(10080).description('禁言时长'),
+      messageTemplate: Schema.string().description('提醒模板'),
+    })).max(10).description('累计处罚级别'),
+    offenseWindowHours: Schema.number().min(1).max(168).description('违规累计窗口，单位小时'),
+    auditRetentionDays: Schema.number().min(1).description('审计保留天数'),
+  }).description('群治理设置覆盖'),
+  content: Schema.object({
+    contentDetectionEnabled: Schema.boolean().description('启用内容检测'),
+    spamModelEnabled: Schema.boolean().description('启用垃圾消息检测模型'),
+    spamModelTrigger: Schema.union([
+      Schema.const('sensitive').description('仅敏感词命中时检测'),
+      Schema.const('always').description('所有未被立即拦截的消息都检测'),
+    ]).description('垃圾消息检测模型触发策略'),
+    spamModelPath: Schema.string().description('本地模型目录'),
+    spamModelReviewThreshold: Schema.number().min(0.5).max(0.99).description('模型进入 AI 复核的置信度阈值'),
+    spamModelActionThreshold: Schema.number().min(0.5).max(0.999).description('模型直接处置的置信度阈值'),
+  }).description('内容检测设置覆盖'),
+  behavior: Schema.object({
+    behaviorDetectionEnabled: Schema.boolean().description('启用行为检测'),
+    burstDetectionEnabled: Schema.boolean().description('启用瞬时刷屏检测'),
+    burstWindowSeconds: Schema.number().min(5).max(60).description('瞬时刷屏统计窗口，单位秒'),
+    burstMessageCount: Schema.number().min(3).max(20).description('窗口内刷屏消息数'),
+    burstCooldownSeconds: Schema.number().min(10).max(3600).description('刷屏处罚冷却时间，单位秒'),
+    burstRecoverySeconds: Schema.number().min(5).max(300).description('刷屏恢复时间，单位秒'),
+    sustainedRateDetectionEnabled: Schema.boolean().description('启用长期发送速率检测'),
+    sustainedBucketCapacity: Schema.number().min(10).max(200).description('长期速率令牌桶容量'),
+    sustainedRefillPerMinute: Schema.number().min(1).max(240).description('长期速率令牌补充速度'),
+    sustainedConfirmSeconds: Schema.number().min(5).max(300).description('长期超速确认时间，单位秒'),
+  }).description('行为检测设置覆盖'),
+  deepseek: Schema.object({
+    aiReviewEnabled: Schema.boolean().description('启用 AI 复核'),
+    apiKey: Schema.string().role('secret').description('DeepSeek API Key'),
+    model: Schema.union(['deepseek-v4-flash', 'deepseek-v4-pro'] as const).description('AI 复核模型'),
+  }).description('AI 复核设置覆盖'),
+}).description('群级配置；未填写字段继承全局默认值')
+
 export interface Config {
   base: {
     welcomeMessage?: string
@@ -223,6 +285,40 @@ export interface Config {
     apiKey?: string
     model?: 'deepseek-v4-flash' | 'deepseek-v4-pro'
   }
+  groupConfigs?: GroupConfig[]
+}
+
+export interface GroupConfig {
+  guildId: string
+  base?: Partial<Config['base']>
+  moderation?: Partial<Config['moderation']>
+  content?: Partial<Config['content']>
+  behavior?: Partial<Config['behavior']>
+  deepseek?: Partial<Config['deepseek']>
+}
+
+export type FlatConfig = Config['base'] & Config['moderation'] & Config['content'] & Config['behavior'] & Config['deepseek']
+
+export function flattenConfig(config: Config): FlatConfig {
+  return {
+    ...(config.base || {}),
+    ...(config.moderation || {}),
+    ...(config.content || {}),
+    ...(config.behavior || {}),
+    ...(config.deepseek || {}),
+  }
+}
+
+export function resolveGroupConfig(config: Config, guildId: string): FlatConfig {
+  const group = (config.groupConfigs || []).find((item) => item.guildId === guildId)
+  return {
+    ...flattenConfig(config),
+    ...(group?.base || {}),
+    ...(group?.moderation || {}),
+    ...(group?.content || {}),
+    ...(group?.behavior || {}),
+    ...(group?.deepseek || {}),
+  }
 }
 
 export const ConfigSchema = Schema.object({
@@ -231,4 +327,7 @@ export const ConfigSchema = Schema.object({
   content: Schema.object(contentDetectionSchema).description('内容检测'),
   behavior: Schema.object(behaviorDetectionSchema).description('行为检测'),
   deepseek: Schema.object(deepseekSchema).description('AI 复核设置'),
+  groupConfigs: Schema.array(groupConfigSchema)
+    .default([])
+    .description('群级配置；每个群可以覆盖插件的全部设置，未填写项继承全局默认值'),
 })
