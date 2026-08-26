@@ -365,15 +365,20 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         signals.push(...findContentSignals(ruleIndex, session.guildId, views))
       }
 
-      if (!signals.length) {
+      const sensitiveSignals = signals.filter((signal) => signal.needsAi)
+      const hasImmediateContentSignal = signals.some((signal) => signal.code === 'redline_keyword' || signal.code === 'blacklist_user')
+      const spamModelTrigger = config.spamModelTrigger || 'sensitive'
+      const shouldRunSpamModel = config.spamModelEnabled === true
+        && !hasImmediateContentSignal
+        && (spamModelTrigger === 'always' || sensitiveSignals.length > 0)
+
+      if (!signals.length && !shouldRunSpamModel) {
         logger.debug(`消息未命中治理规则：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
         return next()
       }
 
-      const sensitiveSignals = signals.filter((signal) => signal.needsAi)
-      const hasImmediateContentSignal = signals.some((signal) => signal.code === 'redline_keyword' || signal.code === 'blacklist_user')
       let aiSignals = sensitiveSignals
-      if (config.spamModelEnabled && !hasImmediateContentSignal && sensitiveSignals.length > 0) {
+      if (shouldRunSpamModel) {
         let modelResult: SpamModelResult | null = null
         if (config.spamModelPath?.trim()) {
           try {
@@ -392,22 +397,23 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         }
 
         if (modelResult) {
-          const modelSignals = sensitiveSignals
           const modelDecision = resolveSpamDecision(
             modelResult.spamProbability,
             clampNumber(config.spamModelReviewThreshold ?? 0.8, 0.5, 0.99),
             clampNumber(config.spamModelActionThreshold ?? 0.98, 0.5, 0.999),
           )
           if (modelDecision === 'action') {
-            signals.push(createSpamModelSignal(modelSignals, modelResult, 'action'))
+            signals.push(createSpamModelSignal(sensitiveSignals, modelResult, 'action'))
             aiSignals = []
           } else if (modelDecision === 'review') {
-            aiSignals = modelSignals.map((signal) => ({
-              ...signal,
-              evidence: `${signal.evidence}；垃圾消息模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
-            }))
+            aiSignals = sensitiveSignals.length
+              ? sensitiveSignals.map((signal) => ({
+                ...signal,
+                evidence: `${signal.evidence}；垃圾消息模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
+              }))
+              : [createSpamModelSignal([], modelResult, 'review')]
           } else {
-            const modelSignal = createSpamModelSignal(modelSignals, modelResult, 'pass')
+            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult, 'pass')
             const passDecision: ModerationDecision = {
               signal: modelSignal,
               action: 'silent',

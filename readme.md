@@ -90,6 +90,7 @@ npm install koishi-plugin-group-assistant
 | --- | --- | --- |
 | `contentDetectionEnabled` | `true` | 开启红线词和敏感词检测 |
 | `spamModelEnabled` | `false` | 开启本地垃圾消息模型 |
+| `spamModelTrigger` | `sensitive` | `sensitive` 仅敏感词命中时检测；`always` 检测所有未被立即拦截的消息 |
 | `spamModelPath` | 空 | 本地模型目录 |
 | `spamModelReviewThreshold` | `0.80` | 模型结果进入 AI 复核的最低置信度 |
 | `spamModelActionThreshold` | `0.98` | 模型结果直接处理的最低置信度 |

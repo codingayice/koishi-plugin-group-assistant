@@ -101,7 +101,13 @@ const contentDetectionSchema = {
     .description('启用内容检测；红线词和敏感词在群治理词库页面维护'),
   spamModelEnabled: Schema.boolean()
     .default(false)
-    .description('启用本地垃圾消息模型；敏感词命中后先由模型判断'),
+    .description('启用本地垃圾消息模型'),
+  spamModelTrigger: Schema.union([
+    Schema.const('sensitive').description('仅敏感词命中时检测'),
+    Schema.const('always').description('所有未被立即拦截的消息都检测'),
+  ])
+    .default('sensitive')
+    .description('本地垃圾消息模型触发策略'),
   spamModelPath: Schema.string()
     .default('')
     .description('本地垃圾消息模型目录，需包含 ONNX 模型和 tokenizer 文件'),
@@ -195,6 +201,7 @@ export interface Config {
   content: {
     contentDetectionEnabled?: boolean
     spamModelEnabled?: boolean
+    spamModelTrigger?: 'sensitive' | 'always'
     spamModelPath?: string
     spamModelReviewThreshold?: number
     spamModelActionThreshold?: number
