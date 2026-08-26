@@ -1755,6 +1755,7 @@ async function sendPunishmentNotice(
   if (!level?.messageTemplate.trim()) return
   const replacements: Record<string, string> = {
     '{at}': String(h('at', { id: userId })),
+    '{type}': getTemplateViolationType(decision.signal),
     '{matched}': decision.signal.source === 'content' ? decision.signal.pattern : '',
     '{evidence}': decision.signal.source === 'content'
       ? decision.signal.evidence
@@ -1776,6 +1777,10 @@ function truncateTemplateContent(content: string) {
   const message = extractPlainText(content).replace(/\s+/g, ' ').trim()
   if (message.length <= 160) return message
   return `${message.slice(0, 160)}...`
+}
+
+function getTemplateViolationType(signal: ModerationSignal) {
+  return signal.source === 'content' ? '内容违规' : '行为违规'
 }
 
 async function deleteMessage(session: Session) {
