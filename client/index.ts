@@ -930,9 +930,6 @@ const WordlistPage = defineComponent({
           h('span', { class: 'detail-label' }, '消息'), h('span', selectedAudit.value.messageId || '未知'),
         ]),
         h('div', { class: 'detail-section' }, [
-          h('strong', '命中关键词'), h('p', selectedAudit.value.pattern || '无'),
-        ]),
-        h('div', { class: 'detail-section' }, [
           h('strong', '检测证据'), h('p', selectedAudit.value.evidence || '无'),
         ]),
         h('div', { class: 'detail-section' }, [
@@ -949,7 +946,6 @@ const WordlistPage = defineComponent({
                   h('span', EVENT_RESULT_LABELS[event.result] || event.result),
                   h('span', formatDateTime(event.createdAt)),
                 ]),
-                event.pattern ? h('p', `关键词：${event.pattern}`) : null,
                 h('p', `证据：${event.evidence || '无'}`),
               ])))
               : h('p', '暂无检测链路。'),

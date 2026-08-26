@@ -1378,7 +1378,7 @@ function ruleToSignal(rule: ModerationRule): ModerationSignal {
     publicReason: sensitive
       ? `消息内容待复核，命中：${rule.pattern}`
       : `消息内容违反群规，命中：${rule.pattern}`,
-    evidence: `命中${formatScope(rule.scope)}关键词 #${rule.id}`,
+    evidence: `命中${formatScope(rule.scope)}关键词 #${rule.id}(${rule.pattern})`,
     pattern: rule.pattern,
     action: sensitive ? 'silent' : 'delete',
     needsAi: sensitive,
@@ -1875,7 +1875,6 @@ async function sendPunishmentNotice(
   const replacements: Record<string, string> = {
     '{at}': String(h('at', { id: userId })),
     '{type}': getTemplateViolationType(decision.signal),
-    '{matched}': decision.signal.source === 'content' ? decision.signal.pattern : '',
     '{evidence}': decision.signal.source === 'content'
       ? decision.signal.evidence
       : decision.signal.publicReason,
