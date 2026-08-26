@@ -69,7 +69,6 @@ export interface ModerationAudit {
   status: string
   offenseCount: number
   reviewedByAi: boolean
-  aiReason: string
   content: string
   createdAt: string
   updatedAt: string
@@ -444,7 +443,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
               offenseCount: 0,
               punishmentLevel: null,
             }
-            await createAudit(ctx, session, passDecision, 0, 'dismissed', false, '', session.userId || '', traceId)
+            await createAudit(ctx, session, passDecision, 0, 'dismissed', false, session.userId || '', traceId)
             aiSignals = []
           }
         }
@@ -478,7 +477,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         logger.debug(`刷屏冷却期间继续拦截：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
       }
       if (selected.writeAudit) {
-        await createAudit(ctx, session, decision, offenseCount, 'confirmed', false, '', session.userId || '', traceId)
+        await createAudit(ctx, session, decision, offenseCount, 'confirmed', false, session.userId || '', traceId)
       }
       await executeAction(session, decision)
 
@@ -518,7 +517,6 @@ function extendTables(ctx: Context) {
     status: 'string',
     offenseCount: 'integer',
     reviewedByAi: 'boolean',
-    aiReason: 'text',
     content: 'text',
     createdAt: 'string',
     updatedAt: 'string',
@@ -626,7 +624,6 @@ interface ConsoleAuditRecord {
   status: string
   offenseCount: number
   reviewedByAi: boolean
-  aiReason: string
   content: string
   createdAt: string
   updatedAt: string
@@ -919,7 +916,6 @@ function toConsoleAuditRecord(record: ModerationAudit): ConsoleAuditRecord {
     status: record.status,
     offenseCount: record.offenseCount,
     reviewedByAi: record.reviewedByAi,
-    aiReason: record.aiReason,
     content: record.content,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -1153,8 +1149,7 @@ function registerAuditCommand(ctx: Context, config: FlatConfig) {
       if (!latest.length) return '暂无违规记录。'
 
       return latest.map((record) => {
-        const ai = record.reviewedByAi ? `，AI：${record.aiReason || record.status}` : ''
-        return `#${record.id} 用户 ${record.userId} 命中【${record.pattern}】[${record.signalCode}]，证据：${record.evidence} -> ${record.action}，状态 ${record.status}，同类累计 ${record.offenseCount} 次${ai}`
+        return `#${record.id} 用户 ${record.userId} 命中【${record.pattern}】[${record.signalCode}]，证据：${record.evidence} -> ${record.action}，状态 ${record.status}，同类累计 ${record.offenseCount} 次`
       }).join('\n')
     })
 }
@@ -1289,7 +1284,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
         offenseCount: offense.offenseCount,
         punishmentLevel: null,
       }
-      await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
+      await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, userId)
       await session.send(`${h('at', { id: userId })} 管理员警告：${reason}`)
       logger.info(`手动警告完成：群 ${session.guildId || ''}，目标用户 ${userId}，累计 ${offense.offenseCount} 次`)
       return `已记录用户 ${userId} 的警告，同类累计 ${offense.offenseCount} 次。`
@@ -1307,7 +1302,7 @@ function registerManualPunishmentCommands(ctx: Context, config: FlatConfig, poli
       const signal = createSignal('manual_action', 'manual', reason, reason, action)
       const offense = await recordOffense(ctx, session.guildId || '', userId, signal, policy)
       const decision = createDecision(signal, offense.offenseCount, policy)
-      await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, '', userId)
+      await createAudit(ctx, session, decision, offense.offenseCount, 'confirmed', false, userId)
       const result = await executeManualAction(session, userId, decision)
       logger.info(`手动处罚完成：群 ${session.guildId || ''}，目标用户 ${userId}，动作 ${decision.action}，累计 ${offense.offenseCount} 次`)
       return `已记录用户 ${userId} 的处罚：${decision.action}，同类累计 ${offense.offenseCount} 次。${result ? `\n${result}` : ''}`
@@ -1576,7 +1571,6 @@ async function createAudit(
   offenseCount: number,
   status: string,
   reviewedByAi: boolean,
-  aiReason: string,
   targetUserId = session.userId || '',
   traceId: string = createTraceId(),
 ) {
@@ -1596,7 +1590,6 @@ async function createAudit(
     status,
     offenseCount,
     reviewedByAi,
-    aiReason,
     content: (session.content || '').slice(0, 2_000),
     createdAt: now,
     updatedAt: now,
@@ -1669,12 +1662,12 @@ async function scheduleAiReview(
     logger.warn(`跳过 AI 复核：${!config.aiReviewEnabled ? '功能未启用' : '未配置 API Key'}，群 ${session.guildId || ''}，消息 ${session.messageId || ''}`)
     const evidence = 'AI 复核未启用或未配置 API Key'
     await recordAuditEvent(ctx, traceId, 'ai_review', combinedSignal, 'skipped', evidence)
-    await createAudit(ctx, session, decision, 0, 'skipped', false, evidence, session.userId || '', traceId)
+    await createAudit(ctx, session, decision, 0, 'skipped', false, session.userId || '', traceId)
     return
   }
 
   await recordAuditEvent(ctx, traceId, 'ai_review', combinedSignal, 'pending')
-  const audit = await createAudit(ctx, session, decision, 0, 'pending', false, '', session.userId || '', traceId)
+  const audit = await createAudit(ctx, session, decision, 0, 'pending', false, session.userId || '', traceId)
   const key = `${session.guildId}:${session.messageId || `${session.userId}:${Date.now()}`}`
   const result = queue.enqueue({ key, traceId, session, auditId: audit.id, signals, content })
   logger.info(`提交 AI 复核任务：审计 ${audit.id}，结果 ${result}，信号 ${formatSignalCodes(signals)}`)
@@ -1682,7 +1675,6 @@ async function scheduleAiReview(
     await updateAiAudit(ctx, audit.id, traceId, {
       status: result === 'full' ? 'failed' : 'duplicate',
       evidence: result === 'full' ? 'AI 复核队列已满' : '重复消息复核任务',
-      aiReason: result === 'full' ? 'AI 复核队列已满' : '重复消息复核任务',
     })
   }
 }
@@ -1703,7 +1695,6 @@ async function processAiReviewJob(
           status: 'dismissed',
           evidence: result.reason || 'AI 判定为不违规',
           reviewedByAi: true,
-          aiReason: result.reason || 'AI 判定为不违规',
         })
         logger.info(`AI 复核通过：审计 ${job.auditId}，结果不违规，类别 ${result.category}`)
         return
@@ -1725,7 +1716,6 @@ async function processAiReviewJob(
         offenseCount: offense.offenseCount,
         evidence: aiEvidence,
         reviewedByAi: true,
-        aiReason: result.reason || result.category,
       })
       logger.info(`AI 确认违规：审计 ${job.auditId}，类别 ${result.category}，动作 ${decision.action}，累计 ${offense.offenseCount} 次`)
       await executeAction(job.session, decision)
@@ -1741,7 +1731,6 @@ async function processAiReviewJob(
   await updateAiAudit(ctx, job.auditId, job.traceId, {
     status: 'failed',
     evidence: `AI 复核失败：${String(lastError).slice(0, 160)}`,
-    aiReason: `AI 复核失败：${String(lastError).slice(0, 160)}`,
   })
 }
 
@@ -1815,13 +1804,13 @@ async function updateAiAudit(
   ctx: Context,
   auditId: number,
   traceId: string,
-  patch: Partial<Pick<ModerationAudit, 'status' | 'action' | 'offenseCount' | 'reviewedByAi' | 'aiReason' | 'evidence'>>,
+  patch: Partial<Pick<ModerationAudit, 'status' | 'action' | 'offenseCount' | 'reviewedByAi' | 'evidence'>>,
 ) {
   await ctx.database.set('group-moderation-audit', { id: auditId }, {
     ...patch,
     updatedAt: new Date().toISOString(),
   })
-  const signal = createAiReviewSignal(patch.evidence || patch.aiReason || patch.status || 'AI 复核完成', patch.action || 'silent', false, patch.status === 'confirmed')
+  const signal = createAiReviewSignal(patch.evidence || patch.status || 'AI 复核完成', patch.action || 'silent', false, patch.status === 'confirmed')
   const result = patch.status || 'updated'
   await recordAuditEvent(ctx, traceId, 'ai_review', signal, result)
   if (patch.status && patch.status !== 'pending') {

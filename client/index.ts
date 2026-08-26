@@ -38,7 +38,6 @@ interface AuditRecord {
   status: string
   offenseCount: number
   reviewedByAi: boolean
-  aiReason: string
   content: string
   createdAt: string
   updatedAt: string
@@ -950,9 +949,6 @@ const WordlistPage = defineComponent({
               ])))
               : h('p', '暂无检测链路。'),
         ]),
-        selectedAudit.value.aiReason ? h('div', { class: 'detail-section' }, [
-          h('strong', 'AI 复核'), h('p', selectedAudit.value.aiReason),
-        ]) : null,
       ]),
     ])]) : null
 
