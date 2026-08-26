@@ -62,12 +62,13 @@ npm install koishi-plugin-group-assistant
 
 ## 配置说明
 
-配置页面包括群范围和五组功能配置。
+配置页面按用途分为五组，群号范围位于“基础设置”中。
 
 ### 基础设置
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
+| `guildIds` | 空数组 | 当前配置实例生效的群号；留空表示所有群 |
 | `welcomeMessage` | 内置欢迎语 | 新成员入群时发送的内容，支持 `{username}`、`{botName}` |
 | `leaveMessage` | 内置退群语 | 成员退群时发送的内容，支持 `{userId}` |
 | `botName` | 空 | 欢迎语中的机器人名称 |

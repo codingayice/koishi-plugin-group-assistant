@@ -32,6 +32,9 @@ export const DEFAULT_PUNISHMENT_LEVELS: Required<PunishmentLevelConfig>[] = [
 ]
 
 const baseSchema = {
+  guildIds: Schema.array(Schema.string())
+    .default([])
+    .description('生效群号；留空表示对所有群生效，可通过插件别名创建多套群级配置'),
   welcomeMessage: Schema.string()
     .default('{username}，欢迎加入本群，我是群管家 {botName}。')
     .description('入群欢迎信息'),
@@ -184,8 +187,8 @@ const deepseekSchema = {
 }
 
 export interface Config {
-  guildIds?: string[]
   base: {
+    guildIds?: string[]
     welcomeMessage?: string
     leaveMessage?: string
     botName?: string
@@ -226,7 +229,7 @@ export interface Config {
   }
 }
 
-export type FlatConfig = Config['base'] & Config['moderation'] & Config['content'] & Config['behavior'] & Config['deepseek'] & Pick<Config, 'guildIds'>
+export type FlatConfig = Config['base'] & Config['moderation'] & Config['content'] & Config['behavior'] & Config['deepseek']
 
 export function flattenConfig(config: Config): FlatConfig {
   return {
@@ -235,7 +238,6 @@ export function flattenConfig(config: Config): FlatConfig {
     ...(config.content || {}),
     ...(config.behavior || {}),
     ...(config.deepseek || {}),
-    guildIds: config.guildIds || [],
   }
 }
 
@@ -245,9 +247,6 @@ export function isGuildInScope(config: Pick<FlatConfig, 'guildIds'>, guildId: st
 }
 
 export const ConfigSchema = Schema.object({
-  guildIds: Schema.array(Schema.string())
-    .default([])
-    .description('生效群号；留空表示对所有群生效，可通过插件别名创建多套群级配置'),
   base: Schema.object(baseSchema).description('基础设置'),
   moderation: Schema.object(moderationSchema).description('群治理设置'),
   content: Schema.object(contentDetectionSchema).description('内容检测'),
