@@ -95,6 +95,7 @@ const SIGNAL_LABELS: Record<string, string> = {
   blacklist_user: '黑名单',
   redline_keyword: '红线词',
   sensitive_keyword: '敏感词',
+  spam_model: '垃圾消息模型',
   spam_burst: '刷屏',
   similar_repeat: '相似复读',
   manual_action: '手动处置',

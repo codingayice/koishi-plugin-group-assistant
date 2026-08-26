@@ -21,6 +21,7 @@ const logger = new Logger('content-moderation')
 type RuleScope = 'redline' | 'sensitive'
 type AccessListType = 'whitelist' | 'blacklist'
 type SignalSource = 'access' | 'content' | 'behavior' | 'manual'
+type SpamModelRoute = 'pass' | 'review' | 'action'
 type SignalCode =
   | 'blacklist_user'
   | 'redline_keyword'
@@ -398,7 +399,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
             clampNumber(config.spamModelActionThreshold ?? 0.98, 0.5, 0.999),
           )
           if (modelDecision === 'action') {
-            signals.push(createSpamModelSignal(modelSignals, modelResult, false))
+            signals.push(createSpamModelSignal(modelSignals, modelResult, 'action'))
             aiSignals = []
           } else if (modelDecision === 'review') {
             aiSignals = modelSignals.map((signal) => ({
@@ -406,6 +407,15 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
               evidence: `${signal.evidence}；垃圾消息模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
             }))
           } else {
+            const modelSignal = createSpamModelSignal(modelSignals, modelResult, 'pass')
+            const passDecision: ModerationDecision = {
+              signal: modelSignal,
+              action: 'silent',
+              muteMinutes: 0,
+              offenseCount: 0,
+              punishmentLevel: null,
+            }
+            await createAudit(ctx, session, passDecision, 0, 'dismissed', false, '')
             aiSignals = []
           }
         }
@@ -1908,19 +1918,23 @@ function createSignal(
   }
 }
 
-function createSpamModelSignal(signals: ModerationSignal[], result: SpamModelResult, needsAi: boolean): ModerationSignal {
+function createSpamModelSignal(signals: ModerationSignal[], result: SpamModelResult, route: SpamModelRoute): ModerationSignal {
   const patterns = signals.map((signal) => signal.pattern).filter(Boolean).join('、').slice(0, 500)
   const confidence = `${(result.spamProbability * 100).toFixed(1)}%`
   return {
     code: 'spam_model',
     source: 'content',
-    publicReason: needsAi ? '消息疑似垃圾内容，等待复核' : '消息疑似垃圾内容',
+    publicReason: route === 'pass'
+      ? '本地垃圾消息模型判定放行'
+      : route === 'review'
+        ? '消息疑似垃圾内容，等待复核'
+        : '消息疑似垃圾内容',
     evidence: `垃圾消息模型置信度 ${confidence}${patterns ? `，候选词：${patterns}` : ''}`,
     pattern: patterns || '垃圾消息模型',
-    action: needsAi ? 'silent' : 'delete',
-    needsAi,
+    action: route === 'action' ? 'delete' : 'silent',
+    needsAi: route === 'review',
     ruleId: signals.find((signal) => signal.ruleId)?.ruleId || 0,
-    countsAsOffense: !needsAi,
+    countsAsOffense: route === 'action',
     writeAudit: true,
   }
 }
