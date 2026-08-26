@@ -1561,6 +1561,7 @@ async function scheduleAiReview(
   if (result !== 'queued') {
     await updateAiAudit(ctx, audit.id, {
       status: result === 'full' ? 'failed' : 'duplicate',
+      evidence: result === 'full' ? 'AI 复核队列已满' : '重复消息复核任务',
       aiReason: result === 'full' ? 'AI 复核队列已满' : '重复消息复核任务',
     })
   }
@@ -1580,6 +1581,7 @@ async function processAiReviewJob(
       if (!result.violation) {
         await updateAiAudit(ctx, job.auditId, {
           status: 'dismissed',
+          evidence: result.reason || 'AI 判定为不违规',
           reviewedByAi: true,
           aiReason: result.reason || 'AI 判定为不违规',
         })
@@ -1613,6 +1615,7 @@ async function processAiReviewJob(
         status: 'confirmed',
         action: decision.action,
         offenseCount: offense.offenseCount,
+        evidence: result.reason || result.category,
         reviewedByAi: true,
         aiReason: result.reason || result.category,
       })
@@ -1629,6 +1632,7 @@ async function processAiReviewJob(
   logger.warn(`AI 复核失败: ${lastError}`)
   await updateAiAudit(ctx, job.auditId, {
     status: 'failed',
+    evidence: `AI 复核失败：${String(lastError).slice(0, 160)}`,
     aiReason: `AI 复核失败：${String(lastError).slice(0, 160)}`,
   })
 }
@@ -1702,7 +1706,7 @@ function parseAiReviewResult(content: unknown): AiReviewResult | null {
 async function updateAiAudit(
   ctx: Context,
   auditId: number,
-  patch: Partial<Pick<ModerationAudit, 'status' | 'action' | 'offenseCount' | 'reviewedByAi' | 'aiReason'>>,
+  patch: Partial<Pick<ModerationAudit, 'status' | 'action' | 'offenseCount' | 'reviewedByAi' | 'aiReason' | 'evidence'>>,
 ) {
   await ctx.database.set('group-moderation-audit', { id: auditId }, {
     ...patch,
