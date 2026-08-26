@@ -5,6 +5,7 @@ import {
   Config,
   DEFAULT_PUNISHMENT_LEVELS,
   FlatConfig,
+  isGuildInScope,
   ModerationAction,
   PunishmentAction,
   PunishmentLevelConfig,
@@ -314,12 +315,10 @@ function clampNumber(value: number, minimum: number, maximum: number) {
 
 export function registerContentModeration(
   ctx: Context,
-  resolveConfig: (guildId: string) => FlatConfig,
-  defaultConfig: FlatConfig,
-  configuredGuildIds: string[] = [],
+  config: FlatConfig,
 ) {
   extendTables(ctx)
-  const defaultPolicy = resolvePolicy(defaultConfig)
+  const policy = resolvePolicy(config)
   const activity = new Map<string, MessageActivity>()
   const cache: RuleCache = {
     expiresAt: 0,
@@ -331,7 +330,7 @@ export function registerContentModeration(
     logger.debug('已清除群治理规则缓存')
   }
 
-  registerConsoleWordlistImport(ctx, clearCache, resolveConfig, configuredGuildIds)
+  registerConsoleWordlistImport(ctx, clearCache, config)
 
   const aiQueue = new AiReviewQueue(
     (job) => processAiReviewJob(ctx, job),
@@ -341,23 +340,22 @@ export function registerContentModeration(
   const spamClassifier = new SpamClassifierManager()
   let spamModelErrorAt = 0
 
-  registerAuditCommand(ctx, resolveConfig)
-  registerOffenseCommand(ctx, resolveConfig)
-  registerAccessListCommands(ctx, resolveConfig)
-  registerManualPunishmentCommands(ctx, resolveConfig)
+  registerAuditCommand(ctx, config)
+  registerOffenseCommand(ctx, config)
+  registerAccessListCommands(ctx, config)
+  registerManualPunishmentCommands(ctx, config)
 
   ctx.setInterval(() => {
-    void pruneExpiredData(ctx, resolveConfig).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
+    void pruneExpiredData(ctx, config).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
   }, 6 * 60 * 60_000)
   ctx.on('dispose', () => {
     aiQueue.dispose()
     spamClassifier.dispose()
   })
-  logger.info(`群治理模块已注册：默认预设 ${defaultConfig.governancePreset || 'balanced'}，刷屏 ${defaultPolicy.burstWindowMs / 1000} 秒/${defaultPolicy.burstMessageCount} 条，长期速率 ${defaultPolicy.sustainedBucketCapacity} 条桶/${defaultPolicy.sustainedRefillPerMinute} 条每分钟，冷却 ${defaultPolicy.burstCooldownMs / 1000} 秒，恢复 ${defaultPolicy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
+  logger.info(`群治理模块已注册：群范围 ${config.guildIds?.length ? config.guildIds.join(',') : '全部群'}，预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，长期速率 ${policy.sustainedBucketCapacity} 条桶/${policy.sustainedRefillPerMinute} 条每分钟，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
   ctx.middleware(async (session, next) => {
-    if (!session.guildId || !session.content?.trim()) return next()
-    const config = resolveConfig(session.guildId)
+    if (!session.guildId || !session.content?.trim() || !isGuildInScope(config, session.guildId)) return next()
     if (config.enabled === false) return next()
     if (isPrivileged(session, config)) {
       logger.debug(`跳过群治理：特权用户，群 ${session.guildId}，用户 ${session.userId || ''}`)
@@ -367,7 +365,6 @@ export function registerContentModeration(
     try {
       const guildId = session.guildId
       const userId = session.userId || ''
-      const policy = resolvePolicy(config)
       if (await isUserInAccessList(ctx, guildId, userId, 'whitelist')) {
         logger.debug(`跳过群治理：白名单用户，群 ${guildId}，用户 ${userId}`)
         return next()
@@ -675,8 +672,7 @@ interface ConsoleClientLike {
 function registerConsoleWordlistImport(
   ctx: Context,
   clearCache: () => void,
-  resolveConfig: (guildId: string) => FlatConfig,
-  configuredGuildIds: string[],
+  config: FlatConfig,
 ) {
   ctx.inject(['console'], (consoleContext) => {
     const console = (consoleContext as Context & { console: ConsoleServiceLike }).console
@@ -691,6 +687,7 @@ function registerConsoleWordlistImport(
       const filename = typeof payload?.filename === 'string' ? payload.filename.trim() : 'console-upload.txt'
       const jobId = typeof payload?.jobId === 'string' ? payload.jobId : ''
       if (!guildId) throw new Error('请提供目标群号。')
+      if (!isGuildInScope(config, guildId)) throw new Error('当前配置未覆盖目标群。')
       if (!scope) throw new Error('词库分类只能是红线或敏感。')
       if (!content) throw new Error('请选择要导入的 TXT 文件。')
 
@@ -728,12 +725,13 @@ function registerConsoleWordlistImport(
       const groups = new Map<string, ConsoleGroupRecord>()
       for (const rule of rules) {
         if (!rule.guildId) continue
+        if (!isGuildInScope(config, rule.guildId)) continue
         const group = groups.get(rule.guildId) || { guildId: rule.guildId, ruleCount: 0, enabledCount: 0 }
         group.ruleCount += 1
         if (rule.enabled) group.enabledCount += 1
         groups.set(rule.guildId, group)
       }
-      for (const guildId of configuredGuildIds) {
+      for (const guildId of config.guildIds || []) {
         if (guildId && !groups.has(guildId)) {
           groups.set(guildId, { guildId, ruleCount: 0, enabledCount: 0 })
         }
@@ -742,7 +740,7 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/list-rules', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const scope = parseRuleScope(payload?.scope)
       if (payload?.scope != null && payload.scope !== '' && !scope) {
         throw new Error('词库分类只能是红线或敏感。')
@@ -772,7 +770,7 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/create-rule', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const scope = parseRuleScope(payload?.scope)
       if (!scope) throw new Error('词库分类只能是红线或敏感。')
       if (typeof payload?.pattern !== 'string') throw new Error('请输入关键词。')
@@ -780,7 +778,7 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/update-rule', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const id = parseConsoleRuleId(payload?.id)
       const scope = parseRuleScope(payload?.scope)
       if (!scope) throw new Error('词库分类只能是红线或敏感。')
@@ -790,12 +788,12 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/delete-rule', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       return removeRule(ctx, parseConsoleRuleId(payload?.id), target, clearCache)
     }, { authority: 4 })
 
     console.addListener('group-assistant/delete-group', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const rules = await ctx.database.get('group-moderation-rule', { guildId: target.guildId })
       if (!rules.length) return `群 ${target.guildId} 没有词库规则。`
       await ctx.database.remove('group-moderation-rule', { guildId: target.guildId })
@@ -805,7 +803,7 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/list-audits', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const { page, pageSize } = parseConsolePagination(payload)
       const query: Query<ModerationAudit> = { guildId: target.guildId }
       const userId = typeof payload?.userId === 'string' ? payload.userId.trim() : ''
@@ -839,7 +837,7 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/list-audit-events', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const traceId = typeof payload?.traceId === 'string' ? payload.traceId.trim() : ''
       if (!traceId) throw new Error('审计链路 ID 无效。')
       const [audit] = await ctx.database.get('group-moderation-audit', {
@@ -854,9 +852,9 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/list-offenses', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const { page, pageSize } = parseConsolePagination(payload)
-      const cutoff = new Date(Date.now() - resolvePolicy(resolveConfig(target.guildId)).offenseWindowMs).toISOString()
+      const cutoff = new Date(Date.now() - resolvePolicy(config).offenseWindowMs).toISOString()
       const query: Query<ModerationOffense> = {
         guildId: target.guildId,
         updatedAt: { $gte: cutoff },
@@ -881,7 +879,7 @@ function registerConsoleWordlistImport(
     }, { authority: 4 })
 
     console.addListener('group-assistant/clear-offense', async (payload: ConsoleRulePayload) => {
-      const target = getConsoleRuleTarget(payload)
+      const target = getConsoleRuleTarget(payload, config)
       const userId = typeof payload?.userId === 'string' ? payload.userId.trim() : ''
       if (!userId) throw new Error('请提供要清零的用户 ID。')
       return clearOffense(ctx, target.guildId, userId)
@@ -889,9 +887,10 @@ function registerConsoleWordlistImport(
   })
 }
 
-function getConsoleRuleTarget(payload: ConsoleRulePayload): RuleImportTarget {
+function getConsoleRuleTarget(payload: ConsoleRulePayload, config: FlatConfig): RuleImportTarget {
   const guildId = typeof payload?.guildId === 'string' ? payload.guildId.trim() : ''
   if (!guildId) throw new Error('请提供目标群号。')
+  if (!isGuildInScope(config, guildId)) throw new Error('当前配置未覆盖目标群。')
   return { guildId, userId: 'console' }
 }
 
@@ -1157,12 +1156,12 @@ async function updateRule(
   return `已更新规则 #${id}。`
 }
 
-function registerAuditCommand(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
+function registerAuditCommand(ctx: Context, config: FlatConfig) {
   ctx.command('违规记录', '查看最近的群治理记录')
     .option('limit', '-n <limit> 查询条数')
     .action(async ({ session, options }) => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return '你没有权限查看违规记录。'
 
       const limit = Math.min(Math.max(Number(options.limit) || 10, 1), 30)
@@ -1179,13 +1178,13 @@ function registerAuditCommand(ctx: Context, resolveConfig: (guildId: string) => 
     })
 }
 
-function registerOffenseCommand(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
+function registerOffenseCommand(ctx: Context, config: FlatConfig) {
   ctx.command('违规用户', '查看本群有效违规状态')
     .option('limit', '-n <limit> 查询条数')
     .action(async ({ session, options }) => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
       const policy = resolvePolicy(config)
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return '你没有权限查看违规用户。'
 
       const limit = Math.min(Math.max(Number(options.limit) || 10, 1), 30)
@@ -1208,7 +1207,7 @@ function registerOffenseCommand(ctx: Context, resolveConfig: (guildId: string) =
   ctx.command('违规清零 <userId:string>', '清零指定用户的违规状态')
     .action(async ({ session }, userId) => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return '你没有权限清零违规状态。'
       if (!userId) return '请提供要清零的用户 ID。'
 
@@ -1222,21 +1221,21 @@ async function clearOffense(ctx: Context, guildId: string, userId: string) {
   return `已清零用户 ${userId} 的违规状态。`
 }
 
-function registerAccessListCommands(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
-  registerAccessListCommand(ctx, resolveConfig, '白名单', 'whitelist')
-  registerAccessListCommand(ctx, resolveConfig, '黑名单', 'blacklist')
+function registerAccessListCommands(ctx: Context, config: FlatConfig) {
+  registerAccessListCommand(ctx, config, '白名单', 'whitelist')
+  registerAccessListCommand(ctx, config, '黑名单', 'blacklist')
 }
 
 function registerAccessListCommand(
   ctx: Context,
-  resolveConfig: (guildId: string) => FlatConfig,
+  config: FlatConfig,
   commandName: string,
   listType: AccessListType,
 ) {
   ctx.command(`${commandName}.添加 <userId:string> [reason:text]`, `添加${commandName}用户`)
     .action(async ({ session }, userId, reason = '') => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return `你没有权限管理${commandName}。`
       if (!session.guildId) return `${commandName}只能在群聊中管理。`
       if (!userId) return '请提供用户 ID。'
@@ -1263,7 +1262,7 @@ function registerAccessListCommand(
   ctx.command(`${commandName}.删除 <userId:string>`, `删除${commandName}用户`)
     .action(async ({ session }, userId) => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return `你没有权限管理${commandName}。`
       if (!session.guildId) return `${commandName}只能在群聊中管理。`
 
@@ -1286,7 +1285,7 @@ function registerAccessListCommand(
   ctx.command(`${commandName}.列表`, `查看${commandName}`)
     .action(async ({ session }) => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return `你没有权限查看${commandName}。`
 
       const entries = await ctx.database.get('group-moderation-access', {
@@ -1299,12 +1298,12 @@ function registerAccessListCommand(
     })
 }
 
-function registerManualPunishmentCommands(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
+function registerManualPunishmentCommands(ctx: Context, config: FlatConfig) {
   ctx.command('警告 <userId:string> [reason:text]', '手动警告用户并记录违规')
     .action(async ({ session }, userId, reason = '管理员手动警告') => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
       const policy = resolvePolicy(config)
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return '你没有权限手动警告用户。'
       if (!userId) return '请提供要警告的用户 ID。'
 
@@ -1327,8 +1326,8 @@ function registerManualPunishmentCommands(ctx: Context, resolveConfig: (guildId:
     .option('action', '-a <action> 处理动作：warn/delete/mute/kick')
     .action(async ({ session, options }, userId, reason = '管理员手动处罚') => {
       if (!session) return
-      const config = resolveConfig(session.guildId || '')
       const policy = resolvePolicy(config)
+      if (!isGuildInScope(config, session.guildId || '')) return '当前配置未覆盖本群。'
       if (!isPrivileged(session, config)) return '你没有权限手动处罚用户。'
       if (!userId) return '请提供要处罚的用户 ID。'
 
@@ -2194,11 +2193,11 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
 
-async function pruneExpiredData(ctx: Context, resolveConfig: (guildId: string) => FlatConfig) {
+async function pruneExpiredData(ctx: Context, config: FlatConfig) {
   const now = Date.now()
   const audits = await ctx.database.get('group-moderation-audit', {})
   const expiredAuditIds = audits
-    .filter((record) => parseTimestamp(record.createdAt) < now - Math.max(1, resolveConfig(record.guildId).auditRetentionDays ?? 30) * 24 * 60 * 60_000)
+    .filter((record) => isGuildInScope(config, record.guildId) && parseTimestamp(record.createdAt) < now - Math.max(1, config.auditRetentionDays ?? 30) * 24 * 60 * 60_000)
     .map((record) => record.id)
   for (const id of expiredAuditIds) {
     await ctx.database.remove('group-moderation-audit', { id })
@@ -2209,7 +2208,7 @@ async function pruneExpiredData(ctx: Context, resolveConfig: (guildId: string) =
   const expiredEventIds = events
     .filter((record) => {
       const guildId = auditTraceIds.get(record.traceId) || ''
-      return parseTimestamp(record.createdAt) < now - Math.max(1, resolveConfig(guildId).auditRetentionDays ?? 30) * 24 * 60 * 60_000
+      return isGuildInScope(config, guildId) && parseTimestamp(record.createdAt) < now - Math.max(1, config.auditRetentionDays ?? 30) * 24 * 60 * 60_000
     })
     .map((record) => record.id)
   for (const id of expiredEventIds) {
@@ -2218,7 +2217,7 @@ async function pruneExpiredData(ctx: Context, resolveConfig: (guildId: string) =
 
   const offenses = await ctx.database.get('group-moderation-offense', {})
   const expiredOffenseIds = offenses
-    .filter((record) => parseTimestamp(record.updatedAt) < now - resolvePolicy(resolveConfig(record.guildId)).offenseWindowMs)
+    .filter((record) => isGuildInScope(config, record.guildId) && parseTimestamp(record.updatedAt) < now - resolvePolicy(config).offenseWindowMs)
     .map((record) => record.id)
   for (const id of expiredOffenseIds) {
     await ctx.database.remove('group-moderation-offense', { id })

@@ -62,7 +62,7 @@ npm install koishi-plugin-group-assistant
 
 ## 配置说明
 
-配置页面按用途分为六组。
+配置页面包括群范围和五组功能配置。
 
 ### 基础设置
 
@@ -117,18 +117,23 @@ AI 复核用于敏感词模型置信度不足的消息。红线词和刷屏行�
 
 ### 群级配置
 
-`groupConfigs` 用于为不同群聊覆盖插件配置。每一项填写群号后，可以分别覆盖基础设置、群治理、内容检测、行为检测和 AI 复核设置；未填写的字段继续使用全局默认值。
+`guildIds` 表示当前插件配置实例针对哪些群生效。留空表示对所有群生效；填写群号后，只有列表中的群会使用这套配置。
 
-例如，只关闭某个群的治理：
+Koishi 支持通过插件别名创建多套配置。例如：
 
 ```yaml
-groupConfigs:
-  - guildId: '1047767828'
+plugins:
+  group-assistant:strict:
+    guildIds: ['1047767828']
     moderation:
-      enabled: false
+      governancePreset: strict
+  group-assistant:relaxed:
+    guildIds: ['123456789']
+    moderation:
+      governancePreset: relaxed
 ```
 
-群级配置优先于全局配置。治理关闭后，该群不会执行消息治理、入群审核、欢迎和退群提示；词库和历史记录不会被删除。
+这样可以让不同群切换到不同配置实例，不需要在配置内部维护多组群配置。治理关闭后，该配置覆盖的群不会执行消息治理、入群审核、欢迎和退群提示；词库和历史记录不会被删除。
 
 ## 处罚模板
 
