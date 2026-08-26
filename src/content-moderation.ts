@@ -413,13 +413,14 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
 
       const deterministicSignals = signals.filter((signal) => !signal.needsAi)
       const selected = selectHighestPrioritySignal(deterministicSignals)
+      const selectedWithContext = selected ? withOriginalMessage(selected, views.plainText) : null
       logger.info(`消息命中治理信号：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}，信号 ${formatSignalCodes(signals)}，确定性 ${deterministicSignals.length}，待 AI ${aiSignals.length}`)
 
       if (aiSignals.length && !hasImmediateContentSignal) {
         await scheduleAiReview(ctx, config, aiQueue, session, aiSignals, views.rawText)
       }
 
-      if (!selected) {
+      if (!selectedWithContext) {
         if (aiSignals.length) {
           logger.info(`消息已进入 AI 复核，主流程放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
         } else {
@@ -428,17 +429,17 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         return next()
       }
 
-      const offense = selected.countsAsOffense
-        ? await recordOffense(ctx, session.guildId, userId, selected, policy)
+      const offense = selectedWithContext.countsAsOffense
+        ? await recordOffense(ctx, session.guildId, userId, selectedWithContext, policy)
         : null
       const offenseCount = offense?.offenseCount || 0
-      const decision = createDecision(selected, offenseCount, policy)
+      const decision = createDecision(selectedWithContext, offenseCount, policy)
       if (offense) {
-        logger.info(`确定性治理裁决：群 ${guildId}，用户 ${userId}，信号 ${selected.code}，动作 ${decision.action}，累计 ${offense.offenseCount} 次${decision.punishmentLevel ? `，处罚级别 ${decision.punishmentLevel.level}` : ''}`)
+        logger.info(`确定性治理裁决：群 ${guildId}，用户 ${userId}，信号 ${selectedWithContext.code}，动作 ${decision.action}，累计 ${offense.offenseCount} 次${decision.punishmentLevel ? `，处罚级别 ${decision.punishmentLevel.level}` : ''}`)
       } else {
         logger.debug(`刷屏冷却期间继续拦截：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
       }
-      if (selected.writeAudit) {
+      if (selectedWithContext.writeAudit) {
         await createAudit(ctx, session, decision, offenseCount, 'confirmed', false, '')
       }
       await executeAction(session, decision)
@@ -1577,14 +1578,14 @@ async function processAiReviewJob(
         .filter(Boolean)
         .join('、')
         .slice(0, 500)
-      const confirmedSignal: ModerationSignal = {
+      const confirmedSignal = withOriginalMessage({
         ...primary,
         publicReason: `消息内容经复核违反群规${matchedPatterns ? `，命中：${matchedPatterns}` : ''}`,
         evidence: `AI 确认违规：${result.category}`,
         pattern: job.signals.map((signal) => signal.pattern).join('、').slice(0, 500),
         action: 'delete',
         needsAi: false,
-      }
+      }, extractPlainText(job.content))
       const offense = await recordOffense(
         ctx,
         job.session.guildId || '',
@@ -1895,6 +1896,22 @@ function createSignal(
     ruleId: 0,
     countsAsOffense: true,
     writeAudit: true,
+  }
+}
+
+const MAX_PUBLIC_MESSAGE_LENGTH = 160
+
+function withOriginalMessage(signal: ModerationSignal, content: string): ModerationSignal {
+  if (signal.source !== 'content') return signal
+  const message = content.replace(/\s+/g, ' ').trim()
+  if (!message) return signal
+
+  const preview = message.length > MAX_PUBLIC_MESSAGE_LENGTH
+    ? `${message.slice(0, MAX_PUBLIC_MESSAGE_LENGTH)}...`
+    : message
+  return {
+    ...signal,
+    publicReason: `${signal.publicReason}；原始消息：${preview}`,
   }
 }
 
