@@ -184,7 +184,7 @@ async function resolveModelFiles(modelPath: string) {
   try {
     if ((await stat(inputPath)).isFile()) modelRoot = dirname(inputPath)
   } catch {
-    throw new Error(`找不到垃圾消息模型路径：${inputPath}`)
+    throw new Error(`找不到垃圾消息检测模型路径：${inputPath}`)
   }
 
   const modelFile = extname(inputPath).toLowerCase() === '.onnx'

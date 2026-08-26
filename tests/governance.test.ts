@@ -100,7 +100,7 @@ test('长期速率停止后令牌恢复并结束超速状态', () => {
   assert.equal(recovered.overLimitSince, 0)
 })
 
-test('垃圾消息模型按置信度分流', () => {
+test('垃圾消息检测模型按置信度分流', () => {
   assert.equal(resolveSpamDecision(0.79, 0.8, 0.98), 'pass')
   assert.equal(resolveSpamDecision(0.9, 0.8, 0.98), 'review')
   assert.equal(resolveSpamDecision(0.99, 0.8, 0.98), 'action')

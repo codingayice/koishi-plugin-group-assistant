@@ -384,15 +384,15 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
           try {
             modelResult = await spamClassifier.classify(views.plainText, config.spamModelPath)
             spamModelErrorAt = 0
-            logger.info(`垃圾消息模型完成判断：群 ${guildId}，用户 ${userId}，spam 置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`)
+            logger.info(`垃圾消息检测模型完成判断：群 ${guildId}，用户 ${userId}，spam 置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`)
           } catch (err) {
             if (Date.now() - spamModelErrorAt > 60_000) {
-              logger.warn(`垃圾消息模型不可用：群 ${guildId}，${err}`)
+              logger.warn(`垃圾消息检测模型不可用：群 ${guildId}，${err}`)
               spamModelErrorAt = Date.now()
             }
           }
         } else if (Date.now() - spamModelErrorAt > 60_000) {
-          logger.warn('垃圾消息模型已启用，但未配置模型目录。')
+          logger.warn('垃圾消息检测模型已启用，但未配置模型目录。')
           spamModelErrorAt = Date.now()
         }
 
@@ -409,7 +409,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
             aiSignals = sensitiveSignals.length
               ? sensitiveSignals.map((signal) => ({
                 ...signal,
-                evidence: `${signal.evidence}；垃圾消息模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
+                evidence: `${signal.evidence}；垃圾消息检测模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
               }))
               : [createSpamModelSignal([], modelResult, 'review')]
           } else {
@@ -439,7 +439,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         if (aiSignals.length) {
           logger.info(`消息已进入 AI 复核，主流程放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
         } else {
-          logger.debug(`消息经垃圾消息模型判断后放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+          logger.debug(`消息经垃圾消息检测模型判断后放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
         }
         return next()
       }
@@ -1936,12 +1936,12 @@ function createSpamModelSignal(signals: ModerationSignal[], result: SpamModelRes
     code: 'spam_model',
     source: 'content',
     publicReason: route === 'pass'
-      ? '本地垃圾消息模型判定放行'
+      ? '本地垃圾消息检测模型判定放行'
       : route === 'review'
         ? '消息疑似垃圾内容，等待复核'
         : '消息疑似垃圾内容',
-    evidence: `垃圾消息模型置信度 ${confidence}${patterns ? `，候选词：${patterns}` : ''}`,
-    pattern: patterns || '垃圾消息模型',
+    evidence: `垃圾消息检测模型置信度 ${confidence}${patterns ? `，候选词：${patterns}` : ''}`,
+    pattern: patterns || '垃圾消息检测模型',
     action: route === 'action' ? 'delete' : 'silent',
     needsAi: route === 'review',
     ruleId: signals.find((signal) => signal.ruleId)?.ruleId || 0,

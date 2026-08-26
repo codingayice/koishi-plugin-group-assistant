@@ -101,26 +101,26 @@ const contentDetectionSchema = {
     .description('启用内容检测；红线词和敏感词在群治理词库页面维护'),
   spamModelEnabled: Schema.boolean()
     .default(false)
-    .description('启用本地垃圾消息模型'),
+    .description('启用本地垃圾消息检测模型'),
   spamModelTrigger: Schema.union([
     Schema.const('sensitive').description('仅敏感词命中时检测'),
     Schema.const('always').description('所有未被立即拦截的消息都检测'),
   ])
     .default('sensitive')
-    .description('本地垃圾消息模型触发策略'),
+    .description('本地垃圾消息检测模型触发策略'),
   spamModelPath: Schema.string()
     .default('')
-    .description('本地垃圾消息模型目录，需包含 ONNX 模型和 tokenizer 文件'),
+    .description('本地垃圾消息检测模型目录，需包含 ONNX 模型和 tokenizer 文件'),
   spamModelReviewThreshold: Schema.number()
     .default(0.8)
     .min(0.5)
     .max(0.99)
-    .description('垃圾消息模型进入 AI 复核的置信度阈值'),
+    .description('垃圾消息检测模型进入 AI 复核的置信度阈值'),
   spamModelActionThreshold: Schema.number()
     .default(0.98)
     .min(0.5)
     .max(0.999)
-    .description('垃圾消息模型直接处置的置信度阈值'),
+    .description('垃圾消息检测模型直接处置的置信度阈值'),
 }
 
 const behaviorDetectionSchema = {
