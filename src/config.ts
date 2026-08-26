@@ -15,19 +15,19 @@ export const DEFAULT_PUNISHMENT_LEVELS: Required<PunishmentLevelConfig>[] = [
     offenseCount: 1,
     action: 'warn',
     muteDurationMinutes: 10,
-    messageTemplate: '{at} 因【{reason}】受到警告，当前同类违规 {offenseCount} 次。',
+    messageTemplate: '{at} 违规提醒：{evidence}\n命中关键词：{matched}\n消息内容：{content}\n当前同类违规 {offenseCount} 次。',
   },
   {
     offenseCount: 3,
     action: 'mute',
     muteDurationMinutes: 10,
-    messageTemplate: '{at} 因【{reason}】已被禁言 {muteMinutes} 分钟，当前同类违规 {offenseCount} 次。',
+    messageTemplate: '{at} 因违规已被禁言 {muteMinutes} 分钟。\n命中关键词：{matched}\n检测证据：{evidence}\n消息内容：{content}\n当前同类违规 {offenseCount} 次。',
   },
   {
     offenseCount: 5,
     action: 'mute',
     muteDurationMinutes: 60,
-    messageTemplate: '{at} 因多次【{reason}】已被禁言 {muteMinutes} 分钟，当前同类违规 {offenseCount} 次。',
+    messageTemplate: '{at} 因多次违规已被禁言 {muteMinutes} 分钟。\n命中关键词：{matched}\n检测证据：{evidence}\n消息内容：{content}\n当前同类违规 {offenseCount} 次。',
   },
 ]
 
@@ -79,7 +79,7 @@ const moderationSchema = {
       .description('禁言时长，仅禁言动作生效'),
     messageTemplate: Schema.string()
     .default('')
-    .description('提醒模板，留空则不通知；支持 {at}、{reason}、{action}、{muteMinutes}、{offenseCount}、{level}'),
+    .description('提醒模板，留空则不通知；支持 {at}、{matched}、{evidence}、{content}、{action}、{muteMinutes}、{offenseCount}、{level}'),
   }))
     .default(DEFAULT_PUNISHMENT_LEVELS)
     .max(10)
