@@ -11,6 +11,9 @@ import { createBurstActivity, updateBurstActivity } from './spam-detection'
 import type { BurstActivity } from './spam-detection'
 import { createSustainedRateActivity, updateSustainedRateActivity } from './sustained-rate'
 import type { SustainedRateActivity } from './sustained-rate'
+import { SpamClassifierManager } from './spam-classifier'
+import { resolveSpamDecision } from './spam-policy'
+import type { SpamModelResult } from './spam-model-types'
 import { normalizeWordlistPattern, parseWordlist, WORDLIST_IMPORT_LIMITS } from './wordlist-import'
 
 const logger = new Logger('content-moderation')
@@ -22,6 +25,7 @@ type SignalCode =
   | 'blacklist_user'
   | 'redline_keyword'
   | 'sensitive_keyword'
+  | 'spam_model'
   | 'spam_burst'
   | 'spam_sustained'
   | 'manual_action'
@@ -93,6 +97,7 @@ type FlatConfig = Config['base'] & Config['moderation'] & Config['content'] & Co
 
 interface MessageViews {
   rawText: string
+  plainText: string
   keywordText: string
 }
 
@@ -306,6 +311,8 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
     INTERNAL_POLICY.aiQueueConcurrency,
     INTERNAL_POLICY.aiQueueLimit,
   )
+  const spamClassifier = new SpamClassifierManager()
+  let spamModelErrorAt = 0
 
   registerAuditCommand(ctx, config)
   registerOffenseCommand(ctx, config, policy)
@@ -315,7 +322,10 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
   ctx.setInterval(() => {
     void pruneExpiredData(ctx, config, policy).catch((err) => logger.warn(`清理治理记录失败: ${err}`))
   }, 6 * 60 * 60_000)
-  ctx.on('dispose', () => aiQueue.dispose())
+  ctx.on('dispose', () => {
+    aiQueue.dispose()
+    spamClassifier.dispose()
+  })
   logger.info(`群治理模块已注册：预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，长期速率 ${policy.sustainedBucketCapacity} 条桶/${policy.sustainedRefillPerMinute} 条每分钟，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
   ctx.middleware(async (session, next) => {
@@ -359,17 +369,62 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         return next()
       }
 
-      const deterministicSignals = signals.filter((signal) => !signal.needsAi)
       const sensitiveSignals = signals.filter((signal) => signal.needsAi)
-      const selected = selectHighestPrioritySignal(deterministicSignals)
-      logger.info(`消息命中治理信号：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}，信号 ${formatSignalCodes(signals)}，确定性 ${deterministicSignals.length}，待 AI ${sensitiveSignals.length}`)
+      const hasImmediateContentSignal = signals.some((signal) => signal.code === 'redline_keyword' || signal.code === 'blacklist_user')
+      let aiSignals = sensitiveSignals
+      if (config.spamModelEnabled && !hasImmediateContentSignal && sensitiveSignals.length > 0) {
+        let modelResult: SpamModelResult | null = null
+        if (config.spamModelPath?.trim()) {
+          try {
+            modelResult = await spamClassifier.classify(views.plainText, config.spamModelPath)
+            spamModelErrorAt = 0
+            logger.info(`垃圾消息模型完成判断：群 ${guildId}，用户 ${userId}，spam 置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`)
+          } catch (err) {
+            if (Date.now() - spamModelErrorAt > 60_000) {
+              logger.warn(`垃圾消息模型不可用：群 ${guildId}，${err}`)
+              spamModelErrorAt = Date.now()
+            }
+          }
+        } else if (Date.now() - spamModelErrorAt > 60_000) {
+          logger.warn('垃圾消息模型已启用，但未配置模型目录。')
+          spamModelErrorAt = Date.now()
+        }
 
-      if (sensitiveSignals.length && (!selected || getActionRank(selected.action) < getActionRank('delete'))) {
-        await scheduleAiReview(ctx, config, aiQueue, session, sensitiveSignals, views.rawText)
+        if (modelResult) {
+          const modelSignals = sensitiveSignals
+          const modelDecision = resolveSpamDecision(
+            modelResult.spamProbability,
+            clampNumber(config.spamModelReviewThreshold ?? 0.8, 0.5, 0.99),
+            clampNumber(config.spamModelActionThreshold ?? 0.98, 0.5, 0.999),
+          )
+          if (modelDecision === 'action') {
+            signals.push(createSpamModelSignal(modelSignals, modelResult, false))
+            aiSignals = []
+          } else if (modelDecision === 'review') {
+            aiSignals = modelSignals.map((signal) => ({
+              ...signal,
+              evidence: `${signal.evidence}；垃圾消息模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
+            }))
+          } else {
+            aiSignals = []
+          }
+        }
+      }
+
+      const deterministicSignals = signals.filter((signal) => !signal.needsAi)
+      const selected = selectHighestPrioritySignal(deterministicSignals)
+      logger.info(`消息命中治理信号：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}，信号 ${formatSignalCodes(signals)}，确定性 ${deterministicSignals.length}，待 AI ${aiSignals.length}`)
+
+      if (aiSignals.length && !hasImmediateContentSignal) {
+        await scheduleAiReview(ctx, config, aiQueue, session, aiSignals, views.rawText)
       }
 
       if (!selected) {
-        logger.info(`消息已进入 AI 复核，主流程放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+        if (aiSignals.length) {
+          logger.info(`消息已进入 AI 复核，主流程放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+        } else {
+          logger.debug(`消息经垃圾消息模型判断后放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+        }
         return next()
       }
 
@@ -1582,6 +1637,7 @@ async function requestAiReview(ctx: Context, config: FlatConfig, job: AiReviewJo
             role: 'user',
             content: [
               `命中的敏感规则：${job.signals.map((signal) => signal.pattern).join('、')}`,
+              `候选检测证据：${job.signals.map((signal) => signal.evidence).join('；')}`,
               '待审核消息开始：',
               job.content,
               '待审核消息结束。',
@@ -1785,6 +1841,7 @@ function createMessageViews(content: string): MessageViews {
   const plainText = extractPlainText(content)
   return {
     rawText: content,
+    plainText,
     keywordText: normalizeForKeyword(plainText),
   }
 }
@@ -1841,6 +1898,23 @@ function createSignal(
   }
 }
 
+function createSpamModelSignal(signals: ModerationSignal[], result: SpamModelResult, needsAi: boolean): ModerationSignal {
+  const patterns = signals.map((signal) => signal.pattern).filter(Boolean).join('、').slice(0, 500)
+  const confidence = `${(result.spamProbability * 100).toFixed(1)}%`
+  return {
+    code: 'spam_model',
+    source: 'content',
+    publicReason: needsAi ? '消息疑似垃圾内容，等待复核' : '消息疑似垃圾内容',
+    evidence: `垃圾消息模型置信度 ${confidence}${patterns ? `，候选词：${patterns}` : ''}`,
+    pattern: patterns || '垃圾消息模型',
+    action: needsAi ? 'silent' : 'delete',
+    needsAi,
+    ruleId: signals.find((signal) => signal.ruleId)?.ruleId || 0,
+    countsAsOffense: !needsAi,
+    writeAudit: true,
+  }
+}
+
 function formatSignalCodes(signals: ModerationSignal[]) {
   return signals.map((signal) => signal.code).join(',') || 'none'
 }
@@ -1864,8 +1938,9 @@ function getActionRank(action: ModerationAction) {
 function getSignalRank(code: SignalCode) {
   if (code === 'blacklist_user') return 9
   if (code === 'redline_keyword') return 8
-  if (code === 'spam_burst') return 7
-  if (code === 'spam_sustained') return 6
+  if (code === 'spam_model') return 7
+  if (code === 'spam_burst') return 6
+  if (code === 'spam_sustained') return 5
   return 1
 }
 

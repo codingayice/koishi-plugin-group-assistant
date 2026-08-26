@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createBurstActivity, updateBurstActivity } from '../src/spam-detection'
 import { createSustainedRateActivity, updateSustainedRateActivity } from '../src/sustained-rate'
+import { resolveSpamDecision } from '../src/spam-policy'
 import { parseWordlist } from '../src/wordlist-import'
 
 test('词库解析会过滤注释并按生产归一化规则去重', () => {
@@ -97,4 +98,10 @@ test('长期速率停止后令牌恢复并结束超速状态', () => {
   assert.equal(recovered.overLimit, false)
   assert.equal(recovered.confirmed, false)
   assert.equal(recovered.overLimitSince, 0)
+})
+
+test('垃圾消息模型按置信度分流', () => {
+  assert.equal(resolveSpamDecision(0.79, 0.8, 0.98), 'pass')
+  assert.equal(resolveSpamDecision(0.9, 0.8, 0.98), 'review')
+  assert.equal(resolveSpamDecision(0.99, 0.8, 0.98), 'action')
 })

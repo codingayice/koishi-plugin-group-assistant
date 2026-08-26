@@ -99,6 +99,22 @@ const contentDetectionSchema = {
   contentDetectionEnabled: Schema.boolean()
     .default(true)
     .description('启用内容检测；红线词和敏感词在群治理词库页面维护'),
+  spamModelEnabled: Schema.boolean()
+    .default(false)
+    .description('启用本地垃圾消息模型；敏感词命中后先由模型判断'),
+  spamModelPath: Schema.string()
+    .default('')
+    .description('本地垃圾消息模型目录，需包含 ONNX 模型和 tokenizer 文件'),
+  spamModelReviewThreshold: Schema.number()
+    .default(0.8)
+    .min(0.5)
+    .max(0.99)
+    .description('垃圾消息模型进入 AI 复核的置信度阈值'),
+  spamModelActionThreshold: Schema.number()
+    .default(0.98)
+    .min(0.5)
+    .max(0.999)
+    .description('垃圾消息模型直接处置的置信度阈值'),
 }
 
 const behaviorDetectionSchema = {
@@ -178,6 +194,10 @@ export interface Config {
   }
   content: {
     contentDetectionEnabled?: boolean
+    spamModelEnabled?: boolean
+    spamModelPath?: string
+    spamModelReviewThreshold?: number
+    spamModelActionThreshold?: number
   }
   behavior: {
     behaviorDetectionEnabled?: boolean

@@ -5,7 +5,7 @@
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "scripts": {
-    "build": "node -e \"const fs=require('fs');fs.rmSync('lib',{recursive:true,force:true});fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('tsconfig.tsbuildinfo',{force:true})\" && tsc --pretty false && esbuild src/index.ts --bundle --platform=node --format=cjs --external:koishi --outfile=lib/index.js && node -e \"require('@koishijs/client/lib').build(process.cwd()).catch(err=>{console.error(err);process.exitCode=1})\"",
+    "build": "node -e \"const fs=require('fs');fs.rmSync('lib',{recursive:true,force:true});fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('tsconfig.tsbuildinfo',{force:true})\" && tsc --pretty false && esbuild src/index.ts --bundle --platform=node --format=cjs --external:koishi --external:onnxruntime-node --outfile=lib/index.js && node -e \"require('@koishijs/client/lib').build(process.cwd()).catch(err=>{console.error(err);process.exitCode=1})\"",
     "typecheck": "tsc --pretty false",
     "test": "esbuild tests/governance.test.ts --bundle --platform=node --format=cjs --outfile=.test/governance.test.cjs && node --test .test/governance.test.cjs && node -e \"require('fs').rmSync('.test',{recursive:true,force:true})\""
   },
@@ -15,6 +15,9 @@
     "client"
   ],
   "license": "MIT",
+  "dependencies": {
+    "onnxruntime-node": "^1.29.0"
+  },
   "keywords": [
     "chatbot",
     "koishi",
