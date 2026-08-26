@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { $, Context, h, Logger, Query, Session } from 'koishi'
 import {
   Config,
@@ -27,6 +28,7 @@ type SignalCode =
   | 'redline_keyword'
   | 'sensitive_keyword'
   | 'spam_model'
+  | 'ai_review'
   | 'spam_burst'
   | 'spam_sustained'
   | 'manual_action'
@@ -35,6 +37,7 @@ declare module 'koishi' {
   interface Tables {
     'group-moderation-rule': ModerationRule
     'group-moderation-audit': ModerationAudit
+    'group-moderation-audit-event': ModerationAuditEvent
     'group-moderation-offense': ModerationOffense
     'group-moderation-access': ModerationAccessEntry
   }
@@ -52,6 +55,7 @@ export interface ModerationRule {
 
 export interface ModerationAudit {
   id: number
+  traceId: string
   guildId: string
   channelId: string
   userId: string
@@ -69,6 +73,17 @@ export interface ModerationAudit {
   content: string
   createdAt: string
   updatedAt: string
+}
+
+export interface ModerationAuditEvent {
+  id: number
+  traceId: string
+  stage: string
+  signalCode: string
+  result: string
+  pattern: string
+  evidence: string
+  createdAt: string
 }
 
 export interface ModerationOffense {
@@ -131,6 +146,7 @@ interface AiReviewResult {
 
 interface AiReviewJob {
   key: string
+  traceId: string
   session: Session
   auditId: number
   signals: ModerationSignal[]
@@ -345,6 +361,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
       }
 
       const views = createMessageViews(session.content)
+      const traceId = createTraceId()
       const signals: ModerationSignal[] = []
 
       if (await isUserInAccessList(ctx, guildId, userId, 'blacklist')) {
@@ -364,6 +381,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
       if (config.contentDetectionEnabled !== false) {
         signals.push(...findContentSignals(ruleIndex, session.guildId, views))
       }
+      await recordInitialDetectionEvents(ctx, traceId, signals)
 
       const sensitiveSignals = signals.filter((signal) => signal.needsAi)
       const hasImmediateContentSignal = signals.some((signal) => signal.code === 'redline_keyword' || signal.code === 'blacklist_user')
@@ -403,17 +421,22 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
             clampNumber(config.spamModelActionThreshold ?? 0.98, 0.5, 0.999),
           )
           if (modelDecision === 'action') {
-            signals.push(createSpamModelSignal(sensitiveSignals, modelResult, 'action'))
+            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult, 'action')
+            await recordAuditEvent(ctx, traceId, 'spam_model', modelSignal, 'action')
+            signals.push(modelSignal)
             aiSignals = []
           } else if (modelDecision === 'review') {
+            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult, 'review')
+            await recordAuditEvent(ctx, traceId, 'spam_model', modelSignal, 'review')
             aiSignals = sensitiveSignals.length
               ? sensitiveSignals.map((signal) => ({
                 ...signal,
                 evidence: `${signal.evidence}；垃圾消息检测模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
               }))
-              : [createSpamModelSignal([], modelResult, 'review')]
+              : [modelSignal]
           } else {
             const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult, 'pass')
+            await recordAuditEvent(ctx, traceId, 'spam_model', modelSignal, 'pass')
             const passDecision: ModerationDecision = {
               signal: modelSignal,
               action: 'silent',
@@ -421,7 +444,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
               offenseCount: 0,
               punishmentLevel: null,
             }
-            await createAudit(ctx, session, passDecision, 0, 'dismissed', false, '')
+            await createAudit(ctx, session, passDecision, 0, 'dismissed', false, '', session.userId || '', traceId)
             aiSignals = []
           }
         }
@@ -432,7 +455,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
       logger.info(`消息命中治理信号：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}，信号 ${formatSignalCodes(signals)}，确定性 ${deterministicSignals.length}，待 AI ${aiSignals.length}`)
 
       if (aiSignals.length && !hasImmediateContentSignal) {
-        await scheduleAiReview(ctx, config, aiQueue, session, aiSignals, views.rawText)
+        await scheduleAiReview(ctx, config, aiQueue, session, traceId, aiSignals, views.rawText)
       }
 
       if (!selected) {
@@ -455,7 +478,7 @@ export function registerContentModeration(ctx: Context, config: FlatConfig) {
         logger.debug(`刷屏冷却期间继续拦截：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
       }
       if (selected.writeAudit) {
-        await createAudit(ctx, session, decision, offenseCount, 'confirmed', false, '')
+        await createAudit(ctx, session, decision, offenseCount, 'confirmed', false, '', session.userId || '', traceId)
       }
       await executeAction(session, decision)
 
@@ -481,6 +504,7 @@ function extendTables(ctx: Context) {
 
   ctx.model.extend('group-moderation-audit', {
     id: 'unsigned',
+    traceId: 'string',
     guildId: 'string',
     channelId: 'string',
     userId: 'string',
@@ -498,6 +522,17 @@ function extendTables(ctx: Context) {
     content: 'text',
     createdAt: 'string',
     updatedAt: 'string',
+  }, { autoInc: true })
+
+  ctx.model.extend('group-moderation-audit-event', {
+    id: 'unsigned',
+    traceId: 'string',
+    stage: 'string',
+    signalCode: 'string',
+    result: 'string',
+    pattern: 'text',
+    evidence: 'text',
+    createdAt: 'string',
   }, { autoInc: true })
 
   ctx.model.extend('group-moderation-offense', {
@@ -554,6 +589,7 @@ interface ConsoleRulePayload {
   userId?: unknown
   signalCode?: unknown
   status?: unknown
+  traceId?: unknown
   from?: unknown
   to?: unknown
 }
@@ -576,6 +612,7 @@ interface ConsoleGroupRecord {
 
 interface ConsoleAuditRecord {
   id: number
+  traceId: string
   guildId: string
   channelId: string
   userId: string
@@ -593,6 +630,17 @@ interface ConsoleAuditRecord {
   content: string
   createdAt: string
   updatedAt: string
+}
+
+interface ConsoleAuditEventRecord {
+  id: number
+  traceId: string
+  stage: string
+  signalCode: string
+  result: string
+  pattern: string
+  evidence: string
+  createdAt: string
 }
 
 interface ConsoleOffenseRecord {
@@ -769,6 +817,21 @@ function registerConsoleWordlistImport(ctx: Context, clearCache: () => void, pol
       }
     }, { authority: 4 })
 
+    console.addListener('group-assistant/list-audit-events', async (payload: ConsoleRulePayload) => {
+      const target = getConsoleRuleTarget(payload)
+      const traceId = typeof payload?.traceId === 'string' ? payload.traceId.trim() : ''
+      if (!traceId) throw new Error('审计链路 ID 无效。')
+      const [audit] = await ctx.database.get('group-moderation-audit', {
+        guildId: target.guildId,
+        traceId,
+      })
+      if (!audit) return { items: [] }
+      const events = await ctx.database.get('group-moderation-audit-event', {
+        traceId,
+      }, { sort: { createdAt: 'asc' } })
+      return { items: events.map(toConsoleAuditEventRecord) }
+    }, { authority: 4 })
+
     console.addListener('group-assistant/list-offenses', async (payload: ConsoleRulePayload) => {
       const target = getConsoleRuleTarget(payload)
       const { page, pageSize } = parseConsolePagination(payload)
@@ -842,6 +905,7 @@ function toConsoleRuleRecord(rule: ModerationRule): ConsoleRuleRecord {
 function toConsoleAuditRecord(record: ModerationAudit): ConsoleAuditRecord {
   return {
     id: record.id,
+    traceId: record.traceId,
     guildId: record.guildId,
     channelId: record.channelId,
     userId: record.userId,
@@ -859,6 +923,19 @@ function toConsoleAuditRecord(record: ModerationAudit): ConsoleAuditRecord {
     content: record.content,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+  }
+}
+
+function toConsoleAuditEventRecord(record: ModerationAuditEvent): ConsoleAuditEventRecord {
+  return {
+    id: record.id,
+    traceId: record.traceId,
+    stage: record.stage,
+    signalCode: record.signalCode,
+    result: record.result,
+    pattern: record.pattern,
+    evidence: record.evidence,
+    createdAt: record.createdAt,
   }
 }
 
@@ -1501,9 +1578,11 @@ async function createAudit(
   reviewedByAi: boolean,
   aiReason: string,
   targetUserId = session.userId || '',
+  traceId: string = createTraceId(),
 ) {
   const now = new Date().toISOString()
   const audit = await ctx.database.create('group-moderation-audit', {
+    traceId,
     guildId: session.guildId || '',
     channelId: session.channelId || '',
     userId: targetUserId,
@@ -1522,8 +1601,50 @@ async function createAudit(
     createdAt: now,
     updatedAt: now,
   })
+  await recordAuditEvent(ctx, traceId, 'decision', decision.signal, status)
   logger.info(`写入治理审计：审计 ${audit.id}，群 ${audit.guildId}，用户 ${audit.userId}，信号 ${audit.signalCode}，状态 ${audit.status}，动作 ${audit.action}`)
   return audit
+}
+
+function createTraceId(): string {
+  return randomUUID()
+}
+
+async function recordAuditEvent(
+  ctx: Context,
+  traceId: string,
+  stage: string,
+  signal: ModerationSignal,
+  result: string,
+  evidence = signal.evidence,
+) {
+  if (!traceId) return
+  try {
+    await ctx.database.create('group-moderation-audit-event', {
+      traceId,
+      stage,
+      signalCode: signal.code,
+      result,
+      pattern: signal.pattern.slice(0, 500),
+      evidence: evidence.slice(0, 2_000),
+      createdAt: new Date().toISOString(),
+    })
+  } catch (error) {
+    logger.warn(`写入治理检测事件失败：链路 ${traceId}，阶段 ${stage}，${error}`)
+  }
+}
+
+async function recordInitialDetectionEvents(ctx: Context, traceId: string, signals: ModerationSignal[]) {
+  await Promise.all(signals.map((signal) => {
+    const stage = signal.source === 'behavior'
+      ? 'behavior'
+      : signal.source === 'access'
+        ? 'access'
+        : signal.code === 'redline_keyword' || signal.code === 'sensitive_keyword'
+          ? 'keyword'
+          : 'detection'
+    return recordAuditEvent(ctx, traceId, stage, signal, 'hit')
+  }))
 }
 
 async function scheduleAiReview(
@@ -1531,15 +1652,11 @@ async function scheduleAiReview(
   config: FlatConfig,
   queue: AiReviewQueue,
   session: Session,
+  traceId: string,
   signals: ModerationSignal[],
   content: string,
 ) {
-  const primary = signals[0]
-  const combinedSignal: ModerationSignal = {
-    ...primary,
-    evidence: signals.map((signal) => signal.evidence).join('；'),
-    pattern: signals.map((signal) => signal.pattern).join('、').slice(0, 500),
-  }
+  const combinedSignal = createAiReviewSignal()
   const decision: ModerationDecision = {
     signal: combinedSignal,
     action: 'silent',
@@ -1550,16 +1667,19 @@ async function scheduleAiReview(
 
   if (!config.aiReviewEnabled || !config.apiKey) {
     logger.warn(`跳过 AI 复核：${!config.aiReviewEnabled ? '功能未启用' : '未配置 API Key'}，群 ${session.guildId || ''}，消息 ${session.messageId || ''}`)
-    await createAudit(ctx, session, decision, 0, 'skipped', false, 'AI 复核未启用或未配置 API Key')
+    const evidence = 'AI 复核未启用或未配置 API Key'
+    await recordAuditEvent(ctx, traceId, 'ai_review', combinedSignal, 'skipped', evidence)
+    await createAudit(ctx, session, decision, 0, 'skipped', false, evidence, session.userId || '', traceId)
     return
   }
 
-  const audit = await createAudit(ctx, session, decision, 0, 'pending', false, '')
+  await recordAuditEvent(ctx, traceId, 'ai_review', combinedSignal, 'pending')
+  const audit = await createAudit(ctx, session, decision, 0, 'pending', false, '', session.userId || '', traceId)
   const key = `${session.guildId}:${session.messageId || `${session.userId}:${Date.now()}`}`
-  const result = queue.enqueue({ key, session, auditId: audit.id, signals, content })
+  const result = queue.enqueue({ key, traceId, session, auditId: audit.id, signals, content })
   logger.info(`提交 AI 复核任务：审计 ${audit.id}，结果 ${result}，信号 ${formatSignalCodes(signals)}`)
   if (result !== 'queued') {
-    await updateAiAudit(ctx, audit.id, {
+    await updateAiAudit(ctx, audit.id, traceId, {
       status: result === 'full' ? 'failed' : 'duplicate',
       evidence: result === 'full' ? 'AI 复核队列已满' : '重复消息复核任务',
       aiReason: result === 'full' ? 'AI 复核队列已满' : '重复消息复核任务',
@@ -1579,7 +1699,7 @@ async function processAiReviewJob(
       logger.info(`开始 AI 复核：审计 ${job.auditId}，第 ${attempt + 1}/${INTERNAL_POLICY.aiRetries + 1} 次，模型 ${config.model || 'deepseek-v4-flash'}`)
       const result = await requestAiReview(ctx, config, job)
       if (!result.violation) {
-        await updateAiAudit(ctx, job.auditId, {
+        await updateAiAudit(ctx, job.auditId, job.traceId, {
           status: 'dismissed',
           evidence: result.reason || 'AI 判定为不违规',
           reviewedByAi: true,
@@ -1589,20 +1709,8 @@ async function processAiReviewJob(
         return
       }
 
-      const primary = job.signals[0]
-      const matchedPatterns = job.signals
-        .map((signal) => signal.pattern)
-        .filter(Boolean)
-        .join('、')
-        .slice(0, 500)
-      const confirmedSignal: ModerationSignal = {
-        ...primary,
-        publicReason: `消息内容经复核违反群规${matchedPatterns ? `，命中：${matchedPatterns}` : ''}`,
-        evidence: `AI 确认违规：${result.category}`,
-        pattern: job.signals.map((signal) => signal.pattern).join('、').slice(0, 500),
-        action: 'delete',
-        needsAi: false,
-      }
+      const aiEvidence = result.reason || result.category
+      const confirmedSignal = createAiReviewSignal(aiEvidence, 'delete', false, true)
       const offense = await recordOffense(
         ctx,
         job.session.guildId || '',
@@ -1611,11 +1719,11 @@ async function processAiReviewJob(
         policy,
       )
       const decision = createDecision(confirmedSignal, offense.offenseCount, policy)
-      await updateAiAudit(ctx, job.auditId, {
+      await updateAiAudit(ctx, job.auditId, job.traceId, {
         status: 'confirmed',
         action: decision.action,
         offenseCount: offense.offenseCount,
-        evidence: result.reason || result.category,
+        evidence: aiEvidence,
         reviewedByAi: true,
         aiReason: result.reason || result.category,
       })
@@ -1630,7 +1738,7 @@ async function processAiReviewJob(
   }
 
   logger.warn(`AI 复核失败: ${lastError}`)
-  await updateAiAudit(ctx, job.auditId, {
+  await updateAiAudit(ctx, job.auditId, job.traceId, {
     status: 'failed',
     evidence: `AI 复核失败：${String(lastError).slice(0, 160)}`,
     aiReason: `AI 复核失败：${String(lastError).slice(0, 160)}`,
@@ -1706,12 +1814,19 @@ function parseAiReviewResult(content: unknown): AiReviewResult | null {
 async function updateAiAudit(
   ctx: Context,
   auditId: number,
+  traceId: string,
   patch: Partial<Pick<ModerationAudit, 'status' | 'action' | 'offenseCount' | 'reviewedByAi' | 'aiReason' | 'evidence'>>,
 ) {
   await ctx.database.set('group-moderation-audit', { id: auditId }, {
     ...patch,
     updatedAt: new Date().toISOString(),
   })
+  const signal = createAiReviewSignal(patch.evidence || patch.aiReason || patch.status || 'AI 复核完成', patch.action || 'silent', false, patch.status === 'confirmed')
+  const result = patch.status || 'updated'
+  await recordAuditEvent(ctx, traceId, 'ai_review', signal, result)
+  if (patch.status && patch.status !== 'pending') {
+    await recordAuditEvent(ctx, traceId, 'decision', signal, result)
+  }
   logger.info(`更新 AI 审计：审计 ${auditId}，状态 ${patch.status || '保持不变'}${patch.action ? `，动作 ${patch.action}` : ''}`)
 }
 
@@ -1954,6 +2069,26 @@ function createSpamModelSignal(signals: ModerationSignal[], result: SpamModelRes
   }
 }
 
+function createAiReviewSignal(
+  evidence = '等待 AI 复核',
+  action: ModerationAction = 'silent',
+  needsAi = true,
+  countsAsOffense = false,
+): ModerationSignal {
+  return {
+    code: 'ai_review',
+    source: 'content',
+    publicReason: needsAi ? '消息进入 AI 复核' : '消息内容经 AI 复核确认违规',
+    evidence,
+    pattern: '',
+    action,
+    needsAi,
+    ruleId: 0,
+    countsAsOffense,
+    writeAudit: true,
+  }
+}
+
 function formatSignalCodes(signals: ModerationSignal[]) {
   return signals.map((signal) => signal.code).join(',') || 'none'
 }
@@ -1977,6 +2112,7 @@ function getActionRank(action: ModerationAction) {
 function getSignalRank(code: SignalCode) {
   if (code === 'blacklist_user') return 9
   if (code === 'redline_keyword') return 8
+  if (code === 'ai_review') return 7
   if (code === 'spam_model') return 7
   if (code === 'spam_burst') return 6
   if (code === 'spam_sustained') return 5
@@ -2040,6 +2176,14 @@ async function pruneExpiredData(ctx: Context, config: FlatConfig, policy: Resolv
     await ctx.database.remove('group-moderation-audit', { id })
   }
 
+  const events = await ctx.database.get('group-moderation-audit-event', {})
+  const expiredEventIds = events
+    .filter((record) => parseTimestamp(record.createdAt) < auditCutoff)
+    .map((record) => record.id)
+  for (const id of expiredEventIds) {
+    await ctx.database.remove('group-moderation-audit-event', { id })
+  }
+
   const offenseCutoff = Date.now() - policy.offenseWindowMs
   const offenses = await ctx.database.get('group-moderation-offense', {})
   const expiredOffenseIds = offenses
@@ -2048,8 +2192,8 @@ async function pruneExpiredData(ctx: Context, config: FlatConfig, policy: Resolv
   for (const id of expiredOffenseIds) {
     await ctx.database.remove('group-moderation-offense', { id })
   }
-  if (expiredAuditIds.length || expiredOffenseIds.length) {
-    logger.info(`清理过期治理数据：审计 ${expiredAuditIds.length} 条，违规状态 ${expiredOffenseIds.length} 条`)
+  if (expiredAuditIds.length || expiredEventIds.length || expiredOffenseIds.length) {
+    logger.info(`清理过期治理数据：审计 ${expiredAuditIds.length} 条，检测事件 ${expiredEventIds.length} 条，违规状态 ${expiredOffenseIds.length} 条`)
   } else {
     logger.debug('清理过期治理数据：没有需要删除的记录')
   }

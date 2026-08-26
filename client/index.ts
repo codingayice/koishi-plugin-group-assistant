@@ -24,6 +24,7 @@ interface RulePageResponse {
 
 interface AuditRecord {
   id: number
+  traceId: string
   guildId: string
   channelId: string
   userId: string
@@ -41,6 +42,17 @@ interface AuditRecord {
   content: string
   createdAt: string
   updatedAt: string
+}
+
+interface AuditEventRecord {
+  id: number
+  traceId: string
+  stage: string
+  signalCode: string
+  result: string
+  pattern: string
+  evidence: string
+  createdAt: string
 }
 
 interface OffenseRecord {
@@ -96,6 +108,7 @@ const SIGNAL_LABELS: Record<string, string> = {
   redline_keyword: '红线词',
   sensitive_keyword: '敏感词',
   spam_model: '垃圾消息检测模型',
+  ai_review: 'AI 复核',
   spam_burst: '刷屏',
   similar_repeat: '相似复读',
   manual_action: '手动处置',
@@ -115,6 +128,28 @@ const STATUS_LABELS: Record<string, string> = {
   dismissed: '已排除',
   skipped: '未复核',
   failed: '复核失败',
+  duplicate: '重复任务',
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  access: '名单检查',
+  keyword: '关键词检测',
+  behavior: '行为检测',
+  spam_model: '本地模型',
+  ai_review: 'AI 复核',
+  decision: '最终裁决',
+}
+
+const EVENT_RESULT_LABELS: Record<string, string> = {
+  hit: '命中',
+  pass: '放行',
+  review: '待复核',
+  action: '直接处置',
+  pending: '处理中',
+  confirmed: '确认违规',
+  dismissed: '排除违规',
+  skipped: '跳过',
+  failed: '失败',
   duplicate: '重复任务',
 }
 
@@ -160,6 +195,8 @@ const WordlistPage = defineComponent({
     const auditFrom = ref('')
     const auditTo = ref('')
     const selectedAudit = ref<AuditRecord>()
+    const auditEvents = ref<AuditEventRecord[]>([])
+    const auditEventsLoading = ref(false)
 
     const offenses = ref<OffenseRecord[]>([])
     const offensePage = ref(1)
@@ -299,6 +336,25 @@ const WordlistPage = defineComponent({
         offenseStatus.value = `加载失败：${error instanceof Error ? error.message : String(error)}`
       } finally {
         offenseLoading.value = false
+      }
+    }
+
+    const openAudit = async (record: AuditRecord) => {
+      selectedAudit.value = record
+      auditEvents.value = []
+      if (!record.traceId) return
+      auditEventsLoading.value = true
+      try {
+        const result = await send('group-assistant/list-audit-events', {
+          guildId: record.guildId,
+          traceId: record.traceId,
+        })
+        const response = result as { items?: AuditEventRecord[] }
+        auditEvents.value = Array.isArray(response?.items) ? response.items : []
+      } catch (error) {
+        auditStatus.value = `加载检测链路失败：${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        auditEventsLoading.value = false
       }
     }
 
@@ -882,6 +938,22 @@ const WordlistPage = defineComponent({
         h('div', { class: 'detail-section' }, [
           h('strong', '消息内容'), h('p', { class: 'detail-content' }, selectedAudit.value.content || '无'),
         ]),
+        h('div', { class: 'detail-section' }, [
+          h('strong', '检测链路'),
+          auditEventsLoading.value
+            ? h('p', '正在加载检测链路。')
+            : auditEvents.value.length
+              ? h('div', { class: 'audit-trace' }, auditEvents.value.map((event) => h('div', { class: 'audit-trace-event', key: event.id }, [
+                h('div', { class: 'audit-trace-header' }, [
+                  h('span', STAGE_LABELS[event.stage] || event.stage),
+                  h('span', EVENT_RESULT_LABELS[event.result] || event.result),
+                  h('span', formatDateTime(event.createdAt)),
+                ]),
+                event.pattern ? h('p', `关键词：${event.pattern}`) : null,
+                h('p', `证据：${event.evidence || '无'}`),
+              ])))
+              : h('p', '暂无检测链路。'),
+        ]),
         selectedAudit.value.aiReason ? h('div', { class: 'detail-section' }, [
           h('strong', 'AI 复核'), h('p', selectedAudit.value.aiReason),
         ]) : null,
@@ -949,7 +1021,7 @@ const WordlistPage = defineComponent({
             h('span', { class: 'audit-operation' }, [h('button', {
               class: 'link-button primary',
               type: 'button',
-              onClick: () => { selectedAudit.value = record },
+              onClick: () => { void openAudit(record) },
             }, '查看详情')]),
           ]))
           : h('div', { class: 'audit-empty' }, guildId.value.trim() ? '暂无符合条件的违规记录。' : '请先选择群聊。'),

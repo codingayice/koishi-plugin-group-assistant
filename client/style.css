@@ -550,6 +550,33 @@
   overflow-y: auto;
 }
 
+.audit-trace {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.audit-trace-event {
+  padding: 9px 11px;
+  border-left: 3px solid var(--wordlist-primary);
+  background: var(--wordlist-muted, rgba(127, 127, 127, .08));
+}
+
+.audit-trace-header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: var(--wordlist-text-dark);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.audit-trace-header span:last-child {
+  margin-left: auto;
+  color: var(--wordlist-text-light);
+  font-weight: 400;
+}
+
 .scope-tabs {
   display: flex;
   min-height: 42px;
