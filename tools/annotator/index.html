@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>群聊内容标注台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>标</span></div>
+        <div>
+          <p class="eyebrow">LOCAL REVIEW · 仅本机</p>
+          <h1>群聊内容标注台</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span id="save-status" class="save-status" aria-live="polite"><i></i>进度已同步</span>
+        <button id="export-button" class="button button-quiet" type="button">导出结果</button>
+      </div>
+    </header>
+
+    <section class="decision-rail" aria-label="标注进度">
+      <div class="rail-copy">
+        <span>决策轨</span>
+        <strong id="rail-progress">0 / 0</strong>
+      </div>
+      <div class="rail-track" aria-hidden="true">
+        <span id="rail-normal" class="rail-segment rail-normal"></span>
+        <span id="rail-violation" class="rail-segment rail-violation"></span>
+        <span id="rail-skipped" class="rail-segment rail-skipped"></span>
+      </div>
+      <span id="rail-percent" class="rail-percent">0%</span>
+    </section>
+
+    <main class="workspace">
+      <aside class="panel control-panel" aria-label="样本筛选">
+        <div class="panel-heading">
+          <p class="panel-kicker">QUEUE</p>
+          <h2>标注队列</h2>
+        </div>
+
+        <label class="field-label" for="status-filter">状态</label>
+        <select id="status-filter">
+          <option value="todo">待标注</option>
+          <option value="skipped">已跳过</option>
+          <option value="violation">违规</option>
+          <option value="normal">正常</option>
+          <option value="labeled">已标注</option>
+          <option value="all">全部样本</option>
+        </select>
+
+        <label class="field-label" for="tag-filter">特征</label>
+        <select id="tag-filter">
+          <option value="all">全部特征</option>
+        </select>
+
+        <label class="field-label" for="order-filter">排序</label>
+        <select id="order-filter">
+          <option value="source">原始顺序</option>
+          <option value="risk">风险信号优先</option>
+          <option value="frequency">出现次数优先</option>
+        </select>
+
+        <label class="field-label" for="search-input">搜索正文</label>
+        <div class="search-wrap">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.6-4.6m2.1-5.4a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"/></svg>
+          <input id="search-input" type="search" placeholder="输入关键词">
+        </div>
+
+        <div class="queue-count">
+          <span>当前队列</span>
+          <strong id="queue-count">0</strong>
+          <small>条样本</small>
+        </div>
+      </aside>
+
+      <section class="review-stage" aria-live="polite">
+        <article id="message-card" class="message-card">
+          <div class="card-topline">
+            <div>
+              <span id="sample-id" class="sample-id">—</span>
+              <span id="sample-position" class="sample-position">等待载入</span>
+            </div>
+            <span id="sample-state" class="state-badge state-unlabeled">待标注</span>
+          </div>
+
+          <div id="sample-tags" class="tag-row" aria-label="消息特征"></div>
+
+          <div class="message-copy">
+            <p class="message-label">消息正文</p>
+            <p id="sample-text" class="message-text">正在读取本地数据……</p>
+          </div>
+
+          <dl class="metadata">
+            <div>
+              <dt>出现次数</dt>
+              <dd id="sample-occurrences">—</dd>
+            </div>
+            <div>
+              <dt>首次出现</dt>
+              <dd id="sample-first-time">—</dd>
+            </div>
+            <div>
+              <dt>最后出现</dt>
+              <dd id="sample-last-time">—</dd>
+            </div>
+          </dl>
+        </article>
+
+        <div id="empty-state" class="empty-state" hidden>
+          <div class="empty-glyph">✓</div>
+          <h2>当前队列已处理完</h2>
+          <p>切换筛选条件可以复核已标注或跳过的样本。</p>
+        </div>
+
+        <div class="decision-grid" aria-label="标注操作">
+          <button id="violation-button" class="decision-button decision-violation" type="button">
+            <span class="keycap">A</span>
+            <span><strong>违规</strong><small>需要内容治理</small></span>
+          </button>
+          <button id="normal-button" class="decision-button decision-normal" type="button">
+            <span class="keycap">D</span>
+            <span><strong>正常</strong><small>无需处理</small></span>
+          </button>
+        </div>
+
+        <div class="secondary-actions">
+          <button id="previous-button" type="button"><span>←</span> 上一条</button>
+          <button id="skip-button" type="button"><kbd>S</kbd> 暂时跳过</button>
+          <button id="undo-button" type="button"><kbd>Z</kbd> 撤销</button>
+          <button id="next-button" type="button">下一条 <span>→</span></button>
+        </div>
+      </section>
+
+      <aside class="panel insight-panel" aria-label="标注统计">
+        <div class="panel-heading">
+          <p class="panel-kicker">SESSION</p>
+          <h2>实时统计</h2>
+        </div>
+
+        <div class="stat-list">
+          <div class="stat-row stat-todo"><span><i></i>待标注</span><strong id="stat-todo">0</strong></div>
+          <div class="stat-row stat-violation"><span><i></i>违规</span><strong id="stat-violation">0</strong></div>
+          <div class="stat-row stat-normal"><span><i></i>正常</span><strong id="stat-normal">0</strong></div>
+          <div class="stat-row stat-skipped"><span><i></i>已跳过</span><strong id="stat-skipped">0</strong></div>
+        </div>
+
+        <div class="shortcut-card">
+          <h3>键盘速记</h3>
+          <div><kbd>A</kbd><span>违规</span></div>
+          <div><kbd>D</kbd><span>正常</span></div>
+          <div><kbd>S</kbd><span>跳过</span></div>
+          <div><kbd>Z</kbd><span>撤销上一步</span></div>
+          <div><kbd>←</kbd><kbd>→</kbd><span>前后浏览</span></div>
+        </div>
+
+        <p class="privacy-note">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2m-11 0h12v10H6V10Zm6 4v2"/></svg>
+          数据仅在本机读取和保存。
+        </p>
+      </aside>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
