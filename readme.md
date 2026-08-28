@@ -18,7 +18,7 @@
 ## 效果演示
 
 
-![内容治理与垃圾消息检测效果](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/demo-content-moderation.png)
+![内容治理与违规消息检测效果](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/demo-content-moderation.png)
 
 
 ![刷屏与行为检测效果](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/demo-behavior-detection.png)

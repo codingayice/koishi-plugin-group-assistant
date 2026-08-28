@@ -408,11 +408,11 @@ export function registerContentModeration(
           })
           spamModelErrorAt = 0
           if (modelResult.status !== 'skipped') {
-            logger.info(`垃圾消息检测模型完成判断：群 ${guildId}，用户 ${userId}，结果 ${modelResult.status}，spam 置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`)
+            logger.info(`违规消息检测模型完成判断：群 ${guildId}，用户 ${userId}，结果 ${modelResult.status}，违规置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`)
           }
         } catch (err) {
           if (Date.now() - spamModelErrorAt > 60_000) {
-            logger.warn(`垃圾消息检测模型不可用：群 ${guildId}，${err}`)
+            logger.warn(`违规消息检测模型不可用：群 ${guildId}，${err}`)
             spamModelErrorAt = Date.now()
           }
         }
@@ -429,7 +429,7 @@ export function registerContentModeration(
             aiSignals = sensitiveSignals.length
               ? sensitiveSignals.map((signal) => ({
                 ...signal,
-                evidence: `${signal.evidence}；垃圾消息检测模型置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`,
+                evidence: `${signal.evidence}；违规消息检测模型置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`,
               }))
               : [modelSignal]
           } else {
@@ -460,7 +460,7 @@ export function registerContentModeration(
         if (aiSignals.length) {
           logger.info(`消息已进入 AI 复核，主流程放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
         } else {
-          logger.debug(`消息经垃圾消息检测模型判断后放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
+          logger.debug(`消息经违规消息检测模型判断后放行：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
         }
         return next()
       }
@@ -2071,12 +2071,12 @@ function createSpamModelSignal(signals: ModerationSignal[], result: CompletedGro
     code: 'spam_model',
     source: 'content',
     publicReason: route === 'pass'
-      ? '本地垃圾消息检测模型判定放行'
+      ? '本地违规消息检测模型判定放行'
       : route === 'review'
-        ? '消息疑似垃圾内容，等待复核'
-        : '消息疑似垃圾内容',
-    evidence: `垃圾消息检测模型置信度 ${confidence}${patterns ? `，候选词：${patterns}` : ''}`,
-    pattern: patterns || '垃圾消息检测模型',
+        ? '消息疑似违规，等待复核'
+        : '消息疑似违规',
+    evidence: `违规消息检测模型置信度 ${confidence}${patterns ? `，候选词：${patterns}` : ''}`,
+    pattern: patterns || '违规消息检测模型',
     action: route === 'action' ? 'delete' : 'silent',
     needsAi: route === 'review',
     ruleId: signals.find((signal) => signal.ruleId)?.ruleId || 0,
