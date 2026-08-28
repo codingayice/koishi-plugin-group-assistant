@@ -4,7 +4,7 @@
 
 面向 Koishi 的群聊治理插件，提供内容审核、刷屏治理、分级处罚、成员管理和治理记录。
 
-当前版本：**1.1.0**
+当前版本：**1.1.3**
 
 ## 核心能力
 
@@ -18,10 +18,10 @@
 ## 效果演示
 
 
-![内容治理与垃圾消息检测效果](docs/demo-content-moderation.png)
+![内容治理与垃圾消息检测效果](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/demo-content-moderation.png)
 
 
-![刷屏与行为检测效果](docs/demo-behavior-detection.png)
+![刷屏与行为检测效果](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/demo-behavior-detection.png)
 
 ## 安装与使用
 
@@ -228,7 +228,7 @@ plugins:
 
 ### 整体架构
 
-![整体架构](docs/architecture.png)
+![整体架构](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/architecture.png)
 
 插件在 Koishi 中同时注册事件处理器和消息中间件。成员事件负责入群审核、欢迎与退群提示；群消息进入治理中间件后，先经过范围和权限门禁，再并行产生内容信号、行为信号与名单信号。需要语义判断的内容可以继续进入本地文本分类和异步 AI 复核，确定性信号则进入统一裁决链。
 
