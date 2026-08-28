@@ -1,6 +1,6 @@
 # koishi-plugin-group-assistant
 
-[![npm](https://img.shields.io/npm/v/koishi-plugin-group-assistant?style=flat-square)](https://www.npmjs.com/package/koishi-plugin-group-assistant)
+[![npm](https://img.shields.io/npm/v/koishi-plugin-group-assistant/latest.svg?style=flat-square&cacheSeconds=300)](https://www.npmjs.com/package/koishi-plugin-group-assistant)
 
 群聊治理插件，覆盖入群退群通知、入群审核、刷屏检测、基于关键词与模型的违规内容检测、违规自动处罚，保留审计日志。
 
