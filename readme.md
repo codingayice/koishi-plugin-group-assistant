@@ -4,11 +4,11 @@
 
 群聊治理插件，覆盖入群退群通知、入群审核、刷屏检测、基于关键词与模型的违规内容检测、违规自动处罚，保留审计日志。
 
-当前版本：**1.1.4**
+当前版本：**1.2.0**
 
 ## 核心能力
 
-- **内容审核**：红线词立即处理；敏感词先由本地垃圾消息检测模型判断，高置信度直接处理，其余交由 DeepSeek 结合上下文复核。
+- **内容审核**：红线词立即处理；敏感词进入语义审核链，可选本地模型服务负责快速分流，需要时再由 DeepSeek 结合上下文复核。
 - **刷屏治理**：同时覆盖短时间集中刷屏和持续高频发送。
 - **分级处罚**：按照同类违规次数执行警告、禁言或踢出，并可配置禁言时长。
 - **群级规则**：不同群聊可以使用独立的红线词库和敏感词库。
@@ -35,6 +35,12 @@ npm install koishi-plugin-group-assistant
 
 然后在 Koishi 配置中启用 `group-assistant`，并确保数据库服务已经启用。
 
+如需使用本地 BERT 模型，再安装并启用可选配套插件：
+
+```bash
+npm install koishi-plugin-group-assistant-model-onnx
+```
+
 ### 初次使用
 
 1. 打开 Koishi Console，进入“群治理词库”。
@@ -43,6 +49,7 @@ npm install koishi-plugin-group-assistant
 4. 添加关键词，或上传 UTF-8 TXT 文件批量导入。
 5. 在插件配置中选择治理强度和处罚策略。
 6. 需要使用敏感词 AI 复核时，开启 AI 复核并填写 DeepSeek API Key。
+7. 需要本地 BERT 检测时，安装并启用 `group-assistant-model-onnx`，在该插件中配置模型路径、触发策略和阈值。
 
 建议先使用“均衡”治理强度运行，再根据审计记录调整策略。
 
@@ -53,9 +60,9 @@ npm install koishi-plugin-group-assistant
 | 词库 | 适合放入的内容 | 命中后的处理 |
 | --- | --- | --- |
 | 红线词库 | 无需结合语境即可确定违规的关键词 | 立即处理，并累计内容违规 |
-| 敏感词库 | 可能出现在正常讨论、引用或科普中的关键词 | 先由垃圾消息检测模型判断，必要时交由 AI 复核 |
+| 敏感词库 | 可能出现在正常讨论、引用或科普中的关键词 | 进入语义审核；可选本地模型先分流，必要时交由 AI 复核 |
 
-红线词库应保持准确，敏感词库用于覆盖需要结合上下文判断的内容。
+红线词库应保持准确，敏感词库用于覆盖需要结合上下文判断的内容，命中敏感词可选本地模型检测或AI复核。
 
 ### TXT 导入格式
 
@@ -98,11 +105,15 @@ npm install koishi-plugin-group-assistant
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `contentDetectionEnabled` | `true` | 开启红线词和敏感词检测 |
-| `spamModelEnabled` | `false` | 开启本地垃圾消息检测模型 |
-| `spamModelTrigger` | `sensitive` | `sensitive` 仅敏感词命中时检测；`always` 检测所有未被立即拦截的消息 |
-| `spamModelPath` | 空 | 本地模型目录 |
-| `spamModelReviewThreshold` | `0.80` | 模型结果进入 AI 复核的最低置信度 |
-| `spamModelActionThreshold` | `0.98` | 模型结果直接处理的最低置信度 |
+
+主体插件不包含本地模型配置。若启用 `koishi-plugin-group-assistant-model-onnx`，以下配置在配套插件中维护：
+
+| 配套插件配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `modelPath` | 空 | ONNX 模型目录或模型文件路径 |
+| `trigger` | `sensitive` | 仅敏感词命中时检测，或检测所有非立即拦截消息 |
+| `reviewThreshold` | `0.80` | 模型结果进入 AI 复核的最低置信度 |
+| `actionThreshold` | `0.98` | 模型结果直接进入违规处置的最低置信度 |
 
 ### 行为检测
 
@@ -120,9 +131,9 @@ npm install koishi-plugin-group-assistant
 | `apiKey` | 空 | DeepSeek API Key |
 | `model` | `deepseek-v4-flash` | `deepseek-v4-flash` 或 `deepseek-v4-pro` |
 
-AI 复核用于敏感词模型置信度不足的消息。红线词和刷屏行为由本地治理策略直接处理。
+AI 复核用于敏感词候选和本地模型返回 `review` 的消息。本地模型服务未安装或暂时不可用时，敏感词候选仍可直接进入 AI 复核；红线词和刷屏行为由本地治理策略直接处理。
 
-本地模型目录需要包含 ONNX 模型、`config.json` 和 `vocab.txt`。可以从 [chinese_spam_classifier_onnx](https://huggingface.co/app-x/chinese_spam_classifier_onnx) 获取模型文件。
+本地模型路径、触发策略、置信度阈值和 ONNX Runtime 均由 `koishi-plugin-group-assistant-model-onnx` 配套插件管理。其模型目录需要包含 ONNX 模型、`config.json` 和 `vocab.txt`，模型文件可从 [chinese_spam_classifier_onnx](https://huggingface.co/app-x/chinese_spam_classifier_onnx) 获取。
 
 ### 群级配置
 
@@ -230,13 +241,13 @@ plugins:
 
 ![整体架构](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/architecture.png)
 
-插件在 Koishi 中同时注册事件处理器和消息中间件。成员事件负责入群审核、欢迎与退群提示；群消息进入治理中间件后，先经过范围和权限门禁，再并行产生内容信号、行为信号与名单信号。需要语义判断的内容可以继续进入本地文本分类和异步 AI 复核，确定性信号则进入统一裁决链。
+插件在 Koishi 中同时注册事件处理器和消息中间件。成员事件负责入群审核、欢迎与退群提示；群消息进入治理中间件后，先经过范围和权限门禁，再并行产生内容信号、行为信号与名单信号。需要语义判断的内容可以继续调用可选的 `groupAssistantModel` 服务并进入异步 AI 复核，确定性信号则进入统一裁决链。
 
 | 层次 | 模块 | 主要职责 |
 | --- | --- | --- |
 | 事件入口 | Koishi 事件、中间件 | 接收群消息、入群申请和成员变更事件 |
 | 前置门禁 | 群范围、特权用户、访问名单 | 决定是否进入治理链路，黑名单直接产生高优先级信号 |
-| 内容治理 | 文本归一化、Aho–Corasick、本地文本分类、AI 复核 | 从规则和语义两个层面判断消息内容 |
+| 内容治理 | 文本归一化、Aho–Corasick、可选模型服务、AI 复核 | 从规则和语义两个层面判断消息内容 |
 | 行为治理 | 滑动窗口状态机、令牌桶 | 同时识别瞬时爆发和长期持续高频 |
 | 决策治理 | 信号聚合、违规累计、分级处罚 | 将多个检测结果收敛成一次可执行动作 |
 | 状态与数据 | 规则、名单、违规状态、审计、阶段事件 | 保存规则和可追踪的完整治理链路 |
@@ -262,11 +273,12 @@ signals += 黑名单检测
 signals += 滑动窗口检测 + 令牌桶检测
 signals += Aho–Corasick 词库匹配
 
-if 允许运行本地文本分类:
-    pSpam = ONNX(WordPiece(plainText))
-    pSpam < reviewThreshold                 -> 放行并记录
-    reviewThreshold <= pSpam < actionThreshold -> 异步 AI 复核
-    pSpam >= actionThreshold                -> 产生确定性内容信号
+if groupAssistantModel 服务存在:
+    result = groupAssistantModel.evaluate({ text: plainText, sensitiveMatched })
+    result.status == skipped -> 忽略模型结果
+    result.status == pass    -> 放行并记录
+    result.status == review  -> 异步 AI 复核
+    result.status == action  -> 产生确定性内容信号
 
 selected = 按动作强度、信号优先级选择最高优先级确定性信号
 if selected:
@@ -371,78 +383,33 @@ for char in keywordText:
 | 红线词 | `delete` | 否 | 无需上下文即可确定违规的内容 |
 | 敏感词 | `silent` | 是 | 可能存在引用、讨论等正常语境的候选内容 |
 
-红线词和黑名单属于立即信号，会跳过本地文本分类和 AI 复核。敏感词只是召回候选；是否处置由本地文本分类置信度和 AI 复核共同决定。
+红线词和黑名单属于立即信号，会跳过本地模型和 AI 复核。敏感词只是召回候选；是否处置由可选本地模型返回状态和 AI 复核结果共同决定。
 
-### 3. 本地文本分类算法
+### 3. 可选本地模型服务
 
-#### 3.1 模型加载与复用
+本地 BERT 检测由独立的 `koishi-plugin-group-assistant-model-onnx` 提供。
 
-模型目录需要包含 `model_optimized.onnx` 或 `model.onnx`、`config.json` 和 `vocab.txt`。加载时从 `config.id2label` 查找 `spam` 标签索引；若配置未提供则兼容使用索引 1。
+主体向服务传递的内容只有正文和敏感词命中状态：
 
-`SpamClassifierManager` 会缓存已经建立的 ONNX Session：
-
-- 相同模型路径复用同一个 Session 和 tokenizer，避免每条消息重复加载模型。
-- 模型路径变化时丢弃旧实例并重新加载。
-- 并发首次请求共享同一个 `loading Promise`，避免“缓存击穿”导致重复创建 Session。
-
-#### 3.2 BasicTokenizer 与 WordPiece
-
-正文进入模型前执行与 BERT 兼容的基础分词：
-
-1. NFKC 归一化并转为小写。
-2. 忽略非空白控制字符。
-3. 空白用于切分 token。
-4. 中文字符、Unicode 标点和符号单独切分。
-5. 其余连续字符先组成词，再执行 WordPiece。
-
-WordPiece 使用最长前缀贪心：
-
-```text
-start = 0
-while start < word.length:
-    从词尾向 start 回退，寻找词表中的最长片段
-    非首片段添加 "##" 前缀
-    找不到任何片段 -> 整个词返回 [UNK]
+```ts
+groupAssistantModel.evaluate({
+  text: plainText,
+  sensitiveMatched: sensitiveSignals.length > 0,
+})
 ```
 
-最终序列为：
+配套插件完成触发判断、BERT 分词、ONNX 推理和双阈值分流，再返回标准化状态：
 
-```text
-[CLS] + tokens[0:510] + [SEP]
-```
+| 状态 | 主体处理方式 |
+| --- | --- |
+| `skipped` | 本次不运行模型，继续处理已有关键词和行为信号 |
+| `pass` | 记录模型放行结果，不处罚该内容候选 |
+| `review` | 将模型置信度加入证据并进入异步 AI 复核 |
+| `action` | 生成确定性内容信号，进入违规累计和处罚链路 |
 
-最大长度为 512。插件按模型声明动态构造 `input_ids`、`attention_mask`、`token_type_ids / segment_ids` 和 `position_ids`，并以形状 `[1, sequenceLength]` 的 Int64 Tensor 输入 ONNX Runtime。
+红线词和黑名单属于立即信号，主体不会再调用模型或 AI。没有安装配套插件时，敏感词候选直接使用 AI 复核；AI 也未启用时，候选消息不会仅凭敏感词自动处罚。
 
-#### 3.3 ONNX 推理与数值稳定 Softmax
-
-模型输出第一组 logits。为避免指数溢出，Softmax 先减去最大 logit：
-
-```text
-m   = max(z)
-p_i = exp(z_i - m) / sum_j(exp(z_j - m))
-```
-
-插件只读取 `spam` 标签对应的 `pSpam`。当前模型是“垃圾/正常”二分类器，不负责区分广告、辱骂、诈骗等细分类。
-
-#### 3.4 双阈值路由
-
-本地模型可以配置两种触发方式：
-
-- `sensitive`：仅敏感词命中后运行，减少无效推理。
-- `always`：对所有没有被红线词或黑名单立即拦截的消息运行，提高召回。
-
-得到 `pSpam` 后使用双阈值分流：
-
-```text
-if pSpam >= max(reviewThreshold, actionThreshold):
-    action      # 高置信度，直接产生删除信号并累计内容违规
-else if pSpam >= reviewThreshold:
-    review      # 中置信度，进入 AI 复核
-else:
-    pass        # 低置信度，放行并记录 dismissed 审计
-```
-
-默认 `reviewThreshold = 0.80`、`actionThreshold = 0.98`。使用 `max(reviewThreshold, actionThreshold)` 判断直接处置，可以在配置顺序异常时仍保证“处置阈值不低于复核阈值”。
+这种服务边界允许后续接入其他本地分类插件，只要实现相同的 `evaluate()` 协议，主体治理链路无需了解具体模型格式和推理引擎。
 
 ### 4. AI 复核队列
 
@@ -642,8 +609,8 @@ keyword / behavior / access
 | Aho–Corasick | `O(N + Z)` | 每条消息最多 20 个信号，规则缓存 30 秒 |
 | 滑动窗口 | `O(K)` | 只保留窗口内时间戳 |
 | 令牌桶 | `O(1)` | 每个群用户一份常数状态 |
-| 本地 tokenizer | 基础扫描为 `O(L)`；WordPiece 最长前缀搜索取决于单词长度，最坏为超线性 | 模型输入截断为 512 token，但预处理仍会扫描完整正文 |
-| ONNX 推理 | 由模型结构和序列长度决定 | Session 复用、可只在敏感词命中时触发 |
+| 配套插件 tokenizer | 基础扫描为 `O(L)`；WordPiece 最长前缀搜索取决于单词长度，最坏为超线性 | 模型输入截断为 512 token，但预处理仍会扫描完整正文 |
+| 配套插件 ONNX 推理 | 由模型结构和序列长度决定 | Session 复用、可只在敏感词命中时触发 |
 | AI 复核 | 外部网络调用 | 并发 2、容量 100、8 秒超时、最多 3 次请求 |
 | 行为状态 | 平均 `O(1)` Map 查询 | 最大 10,000 用户，空闲 2 小时后可淘汰 |
 
@@ -660,7 +627,7 @@ keyword / behavior / access
 
 建议：
 
-- 首次启用本地模型时保持较高的直接处置阈值，通过审计观察误判，再逐步调整。
+- 首次启用配套模型插件时，在配套插件中保持较高的直接处置阈值，通过审计观察误判，再逐步调整。
 - 红线词优先保证精度；含义宽泛、依赖上下文的词放入敏感词库。
 - 正常消息密集时增大滑动窗口条数或令牌桶容量；持续慢速刷屏明显时降低令牌补充速率。
 - 固定通知机器人或业务账号加入白名单，比整体关闭行为检测更可控。

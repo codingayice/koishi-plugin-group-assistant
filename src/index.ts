@@ -4,8 +4,17 @@ import { registerEventHandlers } from './event-handlers'
 import { registerContentModeration } from './content-moderation'
 
 export const name = 'group-assistant'
-export const inject = ['database', 'http']
+export const inject = {
+  required: ['database', 'http'],
+  optional: ['groupAssistantModel'],
+}
 export { ConfigSchema as Config }
+export type {
+  CompletedGroupAssistantModelResult,
+  GroupAssistantModelRequest,
+  GroupAssistantModelResult,
+  GroupAssistantModelService,
+} from './spam-model-types'
 
 const logger = new Logger('group-assistant')
 

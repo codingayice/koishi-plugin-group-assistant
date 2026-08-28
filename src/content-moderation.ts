@@ -14,9 +14,7 @@ import { createBurstActivity, updateBurstActivity } from './spam-detection'
 import type { BurstActivity } from './spam-detection'
 import { createSustainedRateActivity, updateSustainedRateActivity } from './sustained-rate'
 import type { SustainedRateActivity } from './sustained-rate'
-import { SpamClassifierManager } from './spam-classifier'
-import { resolveSpamDecision } from './spam-policy'
-import type { SpamModelResult } from './spam-model-types'
+import type { CompletedGroupAssistantModelResult, GroupAssistantModelResult } from './spam-model-types'
 import { normalizeWordlistPattern, parseWordlist, WORDLIST_IMPORT_LIMITS } from './wordlist-import'
 
 const logger = new Logger('content-moderation')
@@ -24,7 +22,6 @@ const logger = new Logger('content-moderation')
 type RuleScope = 'redline' | 'sensitive'
 type AccessListType = 'whitelist' | 'blacklist'
 type SignalSource = 'access' | 'content' | 'behavior' | 'manual'
-type SpamModelRoute = 'pass' | 'review' | 'action'
 type SignalCode =
   | 'blacklist_user'
   | 'redline_keyword'
@@ -337,7 +334,6 @@ export function registerContentModeration(
     INTERNAL_POLICY.aiQueueConcurrency,
     INTERNAL_POLICY.aiQueueLimit,
   )
-  const spamClassifier = new SpamClassifierManager()
   let spamModelErrorAt = 0
 
   registerAuditCommand(ctx, config)
@@ -350,7 +346,6 @@ export function registerContentModeration(
   }, 6 * 60 * 60_000)
   ctx.on('dispose', () => {
     aiQueue.dispose()
-    spamClassifier.dispose()
   })
   logger.info(`群治理模块已注册：群范围 ${config.guildIds?.length ? config.guildIds.join(',') : '全部群'}，预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，长期速率 ${policy.sustainedBucketCapacity} 条桶/${policy.sustainedRefillPerMinute} 条每分钟，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
@@ -395,57 +390,50 @@ export function registerContentModeration(
 
       const sensitiveSignals = signals.filter((signal) => signal.needsAi)
       const hasImmediateContentSignal = signals.some((signal) => signal.code === 'redline_keyword' || signal.code === 'blacklist_user')
-      const spamModelTrigger = config.spamModelTrigger || 'sensitive'
-      const shouldRunSpamModel = config.spamModelEnabled === true
-        && !hasImmediateContentSignal
-        && (spamModelTrigger === 'always' || sensitiveSignals.length > 0)
+      const spamModel = hasImmediateContentSignal ? undefined : ctx.groupAssistantModel
+      const shouldEvaluateSpamModel = !!spamModel
 
-      if (!signals.length && !shouldRunSpamModel) {
+      if (!signals.length && !shouldEvaluateSpamModel) {
         logger.debug(`消息未命中治理规则：群 ${guildId}，用户 ${userId}，消息 ${session.messageId || ''}`)
         return next()
       }
 
       let aiSignals = sensitiveSignals
-      if (shouldRunSpamModel) {
-        let modelResult: SpamModelResult | null = null
-        if (config.spamModelPath?.trim()) {
-          try {
-            modelResult = await spamClassifier.classify(views.plainText, config.spamModelPath)
-            spamModelErrorAt = 0
-            logger.info(`垃圾消息检测模型完成判断：群 ${guildId}，用户 ${userId}，spam 置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`)
-          } catch (err) {
-            if (Date.now() - spamModelErrorAt > 60_000) {
-              logger.warn(`垃圾消息检测模型不可用：群 ${guildId}，${err}`)
-              spamModelErrorAt = Date.now()
-            }
+      if (spamModel) {
+        let modelResult: GroupAssistantModelResult | null = null
+        try {
+          modelResult = await spamModel.evaluate({
+            text: views.plainText,
+            sensitiveMatched: sensitiveSignals.length > 0,
+          })
+          spamModelErrorAt = 0
+          if (modelResult.status !== 'skipped') {
+            logger.info(`垃圾消息检测模型完成判断：群 ${guildId}，用户 ${userId}，结果 ${modelResult.status}，spam 置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`)
           }
-        } else if (Date.now() - spamModelErrorAt > 60_000) {
-          logger.warn('垃圾消息检测模型已启用，但未配置模型目录。')
-          spamModelErrorAt = Date.now()
+        } catch (err) {
+          if (Date.now() - spamModelErrorAt > 60_000) {
+            logger.warn(`垃圾消息检测模型不可用：群 ${guildId}，${err}`)
+            spamModelErrorAt = Date.now()
+          }
         }
 
-        if (modelResult) {
-          const modelDecision = resolveSpamDecision(
-            modelResult.spamProbability,
-            clampNumber(config.spamModelReviewThreshold ?? 0.8, 0.5, 0.99),
-            clampNumber(config.spamModelActionThreshold ?? 0.98, 0.5, 0.999),
-          )
-          if (modelDecision === 'action') {
-            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult, 'action')
+        if (modelResult && modelResult.status !== 'skipped') {
+          if (modelResult.status === 'action') {
+            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult)
             await recordAuditEvent(ctx, traceId, 'spam_model', modelSignal, 'action')
             signals.push(modelSignal)
             aiSignals = []
-          } else if (modelDecision === 'review') {
-            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult, 'review')
+          } else if (modelResult.status === 'review') {
+            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult)
             await recordAuditEvent(ctx, traceId, 'spam_model', modelSignal, 'review')
             aiSignals = sensitiveSignals.length
               ? sensitiveSignals.map((signal) => ({
                 ...signal,
-                evidence: `${signal.evidence}；垃圾消息检测模型置信度 ${(modelResult!.spamProbability * 100).toFixed(1)}%`,
+                evidence: `${signal.evidence}；垃圾消息检测模型置信度 ${(modelResult.spamProbability * 100).toFixed(1)}%`,
               }))
               : [modelSignal]
           } else {
-            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult, 'pass')
+            const modelSignal = createSpamModelSignal(sensitiveSignals, modelResult)
             await recordAuditEvent(ctx, traceId, 'spam_model', modelSignal, 'pass')
             const passDecision: ModerationDecision = {
               signal: modelSignal,
@@ -2075,7 +2063,8 @@ function createSignal(
   }
 }
 
-function createSpamModelSignal(signals: ModerationSignal[], result: SpamModelResult, route: SpamModelRoute): ModerationSignal {
+function createSpamModelSignal(signals: ModerationSignal[], result: CompletedGroupAssistantModelResult): ModerationSignal {
+  const route = result.status
   const patterns = signals.map((signal) => signal.pattern).filter(Boolean).join('、').slice(0, 500)
   const confidence = `${(result.spamProbability * 100).toFixed(1)}%`
   return {
