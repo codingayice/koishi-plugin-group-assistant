@@ -2,9 +2,9 @@
 
 [![npm](https://img.shields.io/npm/v/koishi-plugin-group-assistant?style=flat-square)](https://www.npmjs.com/package/koishi-plugin-group-assistant)
 
-面向 Koishi 的群聊治理插件，提供内容审核、刷屏治理、分级处罚、成员管理和治理记录。
+群聊治理插件，覆盖入群退群通知、入群审核、刷屏检测、基于关键词与模型的违规内容检测、违规自动处罚，保留审计日志。
 
-当前版本：**1.1.3**
+当前版本：**1.1.4**
 
 ## 核心能力
 
