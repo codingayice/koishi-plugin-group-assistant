@@ -4,7 +4,9 @@
 
 群聊治理插件，覆盖入群退群通知、入群审核、刷屏检测、基于关键词与模型的违规内容检测、违规自动处罚，保留审计日志。
 
-当前版本：**1.2.0**
+当前版本：**1.3.0**
+
+本版本将本地模型和 AI 复核统一为七分类输出。详细变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 核心能力
 
@@ -40,6 +42,8 @@ npm install koishi-plugin-group-assistant
 ```bash
 npm install koishi-plugin-group-assistant-model-onnx
 ```
+
+模型文件随 `koishi-plugin-group-assistant-model-onnx` 一起发布。安装配套插件后会优先自动查找其 npm 包内置的七分类模型；只有需要替换模型时，才需要在 `modelPath` 中指定自定义目录。
 
 ### 初次使用
 
@@ -110,10 +114,10 @@ npm install koishi-plugin-group-assistant-model-onnx
 
 | 配套插件配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `modelPath` | 空 | ONNX 模型目录或模型文件路径 |
+| `modelPath` | 空 | ONNX 模型目录或模型文件路径；留空时优先使用配套子插件内置模型，再查找项目目录中的 `external/group-assistant/models/chineseharm-bert-seven/calibrated` |
 | `trigger` | `sensitive` | 仅敏感词命中时检测，或检测所有非立即拦截消息 |
-| `reviewThreshold` | `0.80` | 模型结果进入 AI 复核的最低置信度 |
-| `actionThreshold` | `0.98` | 模型结果直接进入违规处置的最低置信度 |
+| `reviewThreshold` | `0.80` | 总违规概率进入 AI 复核的阈值 |
+| `actionThreshold` | `0.98` | 总违规概率直接进入违规处置的阈值 |
 
 ### 行为检测
 
@@ -131,9 +135,7 @@ npm install koishi-plugin-group-assistant-model-onnx
 | `apiKey` | 空 | DeepSeek API Key |
 | `model` | `deepseek-v4-flash` | `deepseek-v4-flash` 或 `deepseek-v4-pro` |
 
-AI 复核用于敏感词候选和本地模型返回 `review` 的消息。本地模型服务未安装或暂时不可用时，敏感词候选仍可直接进入 AI 复核；红线词和刷屏行为由本地治理策略直接处理。
-
-本地模型路径、触发策略、置信度阈值和 ONNX Runtime 均由 `koishi-plugin-group-assistant-model-onnx` 配套插件管理。其模型目录需要包含 ONNX 模型、`config.json` 和 `vocab.txt`，模型文件可从 [chinese_spam_classifier_onnx](https://huggingface.co/app-x/chinese_spam_classifier_onnx) 获取。
+AI 复核用于敏感词候选和本地模型返回 `review` 的消息。本地模型服务未安装或暂时不可用时，敏感词候选仍可直接进入 AI 复核。
 
 ### 群级配置
 
@@ -164,7 +166,7 @@ plugins:
 | 变量 | 含义 |
 | --- | --- |
 | `{at}` | 被处罚用户的 @ |
-| `{type}` | 违规类型：`内容违规` 或 `行为违规` |
+| `{type}` | 违规类型；模型识别到具体类别时为 `内容违规：疑似欺诈内容` 等，普通广告会追加 `请仔细甄别`，行为检测为 `行为违规` |
 | `{evidence}` | 检测证据；词库命中时包含词库类型、规则编号和原始关键词 |
 | `{content}` | 触发治理的消息内容 |
 | `{action}` | 当前处罚动作 |
@@ -398,13 +400,13 @@ groupAssistantModel.evaluate({
 })
 ```
 
-配套插件完成触发判断、BERT 分词、ONNX 推理和双阈值分流，再返回标准化状态：
+配套插件完成触发判断、BERT 分词、ONNX 七分类推理和双阈值分流。它返回分类标签、标签置信度、七类概率以及根据配置计算的总违规概率，再根据总违规概率返回标准化状态：
 
 | 状态 | 主体处理方式 |
 | --- | --- |
 | `skipped` | 本次不运行模型，继续处理已有关键词和行为信号 |
 | `pass` | 记录模型放行结果，不处罚该内容候选 |
-| `review` | 将模型置信度加入证据并进入异步 AI 复核 |
+| `review` | 将模型分类和总违规概率加入证据并进入异步 AI 复核 |
 | `action` | 生成确定性内容信号，进入违规累计和处罚链路 |
 
 红线词和黑名单属于立即信号，主体不会再调用模型或 AI。没有安装配套插件时，敏感词候选直接使用 AI 复核；AI 也未启用时，候选消息不会仅凭敏感词自动处罚。
@@ -437,7 +439,7 @@ AI 复核采用异步、限流、可追踪的任务队列。候选消息提交�
 ```json
 {
   "violation": true,
-  "category": "advertising|abuse|fraud|pornography|other|none",
+  "category": "不违规|普通广告|黑产广告|谩骂引战|低俗色情|博彩|欺诈",
   "reason": "不超过 80 字"
 }
 ```

@@ -1,8 +1,50 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { buildAiReviewRequest, parseAiReviewResult } from '../src/ai-review'
 import { createBurstActivity, updateBurstActivity } from '../src/spam-detection'
 import { createSustainedRateActivity, updateSustainedRateActivity } from '../src/sustained-rate'
 import { parseWordlist } from '../src/wordlist-import'
+import { getTemplateViolationType } from '../src/moderation-template'
+
+test('处罚提醒模板会显示具体内容类别并提示普通广告甄别', () => {
+  assert.equal(getTemplateViolationType({ source: 'content', contentLabel: '欺诈' }), '内容违规：疑似欺诈内容')
+  assert.equal(getTemplateViolationType({ source: 'content', contentLabel: '普通广告' }), '内容违规：疑似普通广告内容，请仔细甄别')
+  assert.equal(getTemplateViolationType({ source: 'content' }), '内容违规')
+  assert.equal(getTemplateViolationType({ source: 'behavior' }), '行为违规')
+})
+
+test('生产链路使用结构化 AI 复核请求', () => {
+  const request = buildAiReviewRequest({
+    model: 'deepseek-v4-flash',
+    content: '测试消息',
+    patterns: ['违规消息检测模型'],
+    evidence: ['违规消息检测模型置信度 85.0%'],
+  })
+
+  assert.equal(request.model, 'deepseek-v4-flash')
+  assert.equal(request.messages[0].role, 'system')
+  assert.match(request.messages[0].content, /先完成 category 分类，再由 category 推导 violation/)
+  assert.match(request.messages[0].content, /普通广告：商品、服务、课程、正常招聘、兼职/)
+  assert.match(request.messages[0].content, /讨论兼职风险.*不违规；实际发起招募/)
+  assert.match(request.messages[1].content, /测试消息/)
+  assert.match(request.messages[1].content, /85\.0%/)
+})
+
+test('AI 复核结果只接受受约束的 JSON', () => {
+  assert.deepEqual(parseAiReviewResult('```json\n{"violation":false,"category":"不违规","reason":"正常讨论"}\n```'), {
+    violation: false,
+    category: '不违规',
+    reason: '正常讨论',
+  })
+  assert.deepEqual(parseAiReviewResult('{"violation":true,"category":"欺诈","reason":"诱导转账"}'), {
+    violation: true,
+    category: '欺诈',
+    reason: '诱导转账',
+  })
+  assert.equal(parseAiReviewResult('{"violation":true,"category":"fraud","reason":"旧版本分类"}'), null)
+  assert.equal(parseAiReviewResult('{"violation":true,"category":"unknown","reason":"无效类别"}'), null)
+  assert.equal(parseAiReviewResult('{"violation":false,"category":"普通广告","reason":"类别不一致"}'), null)
+})
 
 test('词库解析会过滤注释并按生产归一化规则去重', () => {
   const parsed = parseWordlist('\uFEFF# 说明\n微信返利\n微 信 返 利\n\n!!!\n兼职')

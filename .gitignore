@@ -9,6 +9,24 @@ yarn-error.log
 *.tgz
 tsconfig.tsbuildinfo
 .test
+.evaluation
+.discarded
+.venv-ml
+release-assets
+ml/
+scripts/clean-qq-chat.mjs
+scripts/start-annotator.mjs
+scripts/start-content-evaluator.ts
+scripts/start-synthetic-annotator.mjs
+scripts/prepare-real-qq-evaluation.mjs
+tools/annotator/
+tools/content-evaluator/
+tools/synthetic-annotator/
+data/chineseharm-bench
+data/content-moderation
+data/real-qq-group-data
+models/chineseharm-bert
+models/chineseharm-bert-seven
 
 .eslintcache
 .DS_Store

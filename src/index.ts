@@ -11,10 +11,12 @@ export const inject = {
 export { ConfigSchema as Config }
 export type {
   CompletedGroupAssistantModelResult,
+  ContentLabel,
+  ContentProbabilities,
   GroupAssistantModelRequest,
   GroupAssistantModelResult,
   GroupAssistantModelService,
-} from './spam-model-types'
+} from './content-model-types'
 
 const logger = new Logger('group-assistant')
 
