@@ -242,7 +242,7 @@ plugins:
 
 ### 整体架构
 
-![整体架构](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/architecture.png)
+![群聊治理整体架构（GCRA）](https://raw.githubusercontent.com/codingayice/koishi-plugin-group-assistant/master/docs/architecture.png?v=2.0.0)
 
 插件在 Koishi 中同时注册事件处理器和消息中间件。成员事件负责入群审核、欢迎与退群提示；群消息进入治理中间件后，先经过范围和权限门禁，再并行产生内容信号、行为信号与名单信号。需要语义判断的内容可以继续调用可选的 `groupAssistantModel` 服务并进入异步 AI 复核，确定性信号则进入统一裁决链。
 
