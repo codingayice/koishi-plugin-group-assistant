@@ -108,7 +108,7 @@ const SIGNAL_LABELS: Record<string, string> = {
   sensitive_keyword: '敏感词',
   spam_model: '违规消息检测模型',
   ai_review: 'AI 复核',
-  spam_burst: '刷屏',
+  spam_flood: '刷屏',
   similar_repeat: '相似复读',
   manual_action: '手动处置',
 }

@@ -10,10 +10,8 @@ import {
   PunishmentAction,
   PunishmentLevelConfig,
 } from './config'
-import { createBurstActivity, updateBurstActivity } from './spam-detection'
-import type { BurstActivity } from './spam-detection'
-import { createSustainedRateActivity, updateSustainedRateActivity } from './sustained-rate'
-import type { SustainedRateActivity } from './sustained-rate'
+import { createGcraActivity, updateGcraActivity } from './flood-detection'
+import type { GcraActivity } from './flood-detection'
 import type { CompletedGroupAssistantModelResult, GroupAssistantModelResult } from './content-model-types'
 import { normalizeWordlistPattern, parseWordlist, WORDLIST_IMPORT_LIMITS } from './wordlist-import'
 import { buildAiReviewRequest, parseAiReviewResult, type AiReviewResult } from './ai-review'
@@ -30,8 +28,7 @@ type SignalCode =
   | 'sensitive_keyword'
   | 'spam_model'
   | 'ai_review'
-  | 'spam_burst'
-  | 'spam_sustained'
+  | 'spam_flood'
   | 'manual_action'
 
 declare module 'koishi' {
@@ -174,22 +171,15 @@ interface AcNode {
 }
 
 interface MessageActivity {
-  burst: BurstActivity
-  sustained: SustainedRateActivity
+  flood: GcraActivity
   policyKey: string
   updatedAt: number
 }
 
 interface ResolvedPolicy {
-  burstDetectionEnabled: boolean
-  burstWindowMs: number
-  burstMessageCount: number
-  burstCooldownMs: number
-  burstRecoveryMs: number
-  sustainedRateDetectionEnabled: boolean
-  sustainedBucketCapacity: number
-  sustainedRefillPerMinute: number
-  sustainedConfirmMs: number
+  floodRatePerMinute: number
+  floodBurstAllowance: number
+  floodCooldownMs: number
   offenseWindowMs: number
   punishmentLevels: ResolvedPunishmentLevel[]
 }
@@ -217,39 +207,23 @@ const INTERNAL_POLICY = {
   defaultMuteMinutes: 10,
 } as const
 
-const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy,
-  | 'burstDetectionEnabled'
-  | 'sustainedRateDetectionEnabled'
-  | 'punishmentLevels'
->> = {
+const PRESET_POLICIES: Record<GovernancePreset, Omit<ResolvedPolicy, 'punishmentLevels'>> = {
   relaxed: {
-    burstWindowMs: 15_000,
-    burstMessageCount: 10,
-    burstCooldownMs: 90_000,
-    burstRecoveryMs: 20_000,
-    sustainedBucketCapacity: 45,
-    sustainedRefillPerMinute: 24,
-    sustainedConfirmMs: 30_000,
+    floodRatePerMinute: 24,
+    floodBurstAllowance: 12,
+    floodCooldownMs: 90_000,
     offenseWindowMs: 24 * 60 * 60_000,
   },
   balanced: {
-    burstWindowMs: 10_000,
-    burstMessageCount: 6,
-    burstCooldownMs: 60_000,
-    burstRecoveryMs: 15_000,
-    sustainedBucketCapacity: 30,
-    sustainedRefillPerMinute: 18,
-    sustainedConfirmMs: 20_000,
+    floodRatePerMinute: 15,
+    floodBurstAllowance: 8,
+    floodCooldownMs: 60_000,
     offenseWindowMs: 24 * 60 * 60_000,
   },
   strict: {
-    burstWindowMs: 8_000,
-    burstMessageCount: 4,
-    burstCooldownMs: 45_000,
-    burstRecoveryMs: 10_000,
-    sustainedBucketCapacity: 20,
-    sustainedRefillPerMinute: 12,
-    sustainedConfirmMs: 15_000,
+    floodRatePerMinute: 12,
+    floodBurstAllowance: 6,
+    floodCooldownMs: 45_000,
     offenseWindowMs: 24 * 60 * 60_000,
   },
 }
@@ -259,21 +233,15 @@ function resolvePolicy(config: FlatConfig): ResolvedPolicy {
 
   const strategy = preset === 'custom'
     ? {
-        burstWindowMs: clampInteger(config.burstWindowSeconds ?? 10, 5, 60) * 1000,
-        burstMessageCount: clampInteger(config.burstMessageCount ?? 6, 3, 20),
-        burstCooldownMs: clampInteger(config.burstCooldownSeconds ?? 60, 10, 3600) * 1000,
-        burstRecoveryMs: clampInteger(config.burstRecoverySeconds ?? 15, 5, 300) * 1000,
-        sustainedBucketCapacity: clampInteger(config.sustainedBucketCapacity ?? 30, 10, 200),
-        sustainedRefillPerMinute: clampInteger(config.sustainedRefillPerMinute ?? 18, 1, 240),
-        sustainedConfirmMs: clampInteger(config.sustainedConfirmSeconds ?? 20, 5, 300) * 1000,
+        floodRatePerMinute: clampInteger(config.floodRatePerMinute ?? 15, 1, 240),
+        floodBurstAllowance: clampInteger(config.floodBurstAllowance ?? 8, 1, 50),
+        floodCooldownMs: clampInteger(config.floodCooldownSeconds ?? 60, 10, 3600) * 1000,
         offenseWindowMs: clampInteger(config.offenseWindowHours ?? 24, 1, 168) * 60 * 60_000,
       }
     : PRESET_POLICIES[preset]
 
   return {
     ...strategy,
-    burstDetectionEnabled: config.burstDetectionEnabled !== false,
-    sustainedRateDetectionEnabled: config.sustainedRateDetectionEnabled !== false,
     punishmentLevels: resolvePunishmentLevels(config.punishmentLevels),
   }
 }
@@ -345,7 +313,7 @@ export function registerContentModeration(
   ctx.on('dispose', () => {
     aiQueue.dispose()
   })
-  logger.info(`群治理模块已注册：群范围 ${config.guildIds?.length ? config.guildIds.join(',') : '全部群'}，预设 ${config.governancePreset || 'balanced'}，刷屏 ${policy.burstWindowMs / 1000} 秒/${policy.burstMessageCount} 条，长期速率 ${policy.sustainedBucketCapacity} 条桶/${policy.sustainedRefillPerMinute} 条每分钟，冷却 ${policy.burstCooldownMs / 1000} 秒，恢复 ${policy.burstRecoveryMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
+  logger.info(`群治理模块已注册：群范围 ${config.guildIds?.length ? config.guildIds.join(',') : '全部群'}，预设 ${config.governancePreset || 'balanced'}，单人刷屏 GCRA ${policy.floodRatePerMinute} 条每分钟/突发 ${policy.floodBurstAllowance} 条，处罚冷却 ${policy.floodCooldownMs / 1000} 秒，规则缓存 30 秒，AI 队列并发 ${INTERNAL_POLICY.aiQueueConcurrency}，队列上限 ${INTERNAL_POLICY.aiQueueLimit}`)
 
   ctx.middleware(async (session, next) => {
     if (!session.guildId || !session.content?.trim() || !isGuildInScope(config, session.guildId)) return next()
@@ -1403,87 +1371,51 @@ function ruleToSignal(rule: ModerationRule): ModerationSignal {
   }
 }
 
-function detectBehaviorSignals(
+export function detectBehaviorSignals(
   session: Session,
   activity: Map<string, MessageActivity>,
   policy: ResolvedPolicy,
+  now = Date.now(),
 ) {
   const signals: ModerationSignal[] = []
-  const now = Date.now()
   pruneActivity(activity, now)
   const key = `${session.guildId}:${session.userId || 'unknown'}`
   const policyKey = getPolicyKey(policy)
   const existing = activity.get(key)
   const item = !existing || existing.policyKey !== policyKey
     ? {
-        burst: createBurstActivity(),
-        sustained: createSustainedRateActivity(policy.sustainedBucketCapacity, now),
+        flood: createGcraActivity(),
         policyKey,
         updatedAt: now,
       }
     : existing
   item.updatedAt = now
-  if (policy.burstDetectionEnabled) {
-    const burst = updateBurstActivity(
-      item.burst,
-      now,
-      policy.burstWindowMs,
-      policy.burstMessageCount,
-      policy.burstCooldownMs,
-      policy.burstRecoveryMs,
-    )
-    item.burst = burst
-    if (burst.thresholdReached) {
-      const seconds = Math.round(policy.burstWindowMs / 1000)
-      const signal = createSignal(
-        'spam_burst',
-        'behavior',
-        '发送频率异常',
-        `${seconds} 秒内连续发送至少 ${policy.burstMessageCount} 条消息，当前窗口 ${burst.timestamps.length} 条`,
-        'delete',
-      )
-      signal.countsAsOffense = burst.triggered
-      signal.writeAudit = burst.triggered
-      signals.push(signal)
-      if (burst.triggered) {
-        logger.info(`触发刷屏处罚节点：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${burst.timestamps.length}`)
-      } else {
-        logger.debug(`刷屏检测处于持续状态：群 ${session.guildId || ''}，用户 ${session.userId || ''}，窗口消息数 ${burst.timestamps.length}`)
-      }
-    }
-  } else {
-    item.burst = createBurstActivity()
-  }
 
-  if (policy.sustainedRateDetectionEnabled) {
-    const sustained = updateSustainedRateActivity(
-      item.sustained,
-      now,
-      policy.sustainedBucketCapacity,
-      policy.sustainedRefillPerMinute,
-      policy.sustainedConfirmMs,
+  const flood = updateGcraActivity(
+    item.flood,
+    now,
+    policy.floodRatePerMinute,
+    policy.floodBurstAllowance,
+    policy.floodCooldownMs,
+  )
+  item.flood = flood
+  if (flood.exceeded) {
+    const waitSeconds = Math.max(0.1, flood.retryAfterMs / 1000).toFixed(1)
+    const debtSeconds = (flood.virtualDebtMs / 1000).toFixed(1)
+    const penaltyNode = flood.triggered ? '是' : '否'
+    const signal = createSignal(
+      'spam_flood',
+      'behavior',
+      '发送频率异常',
+      `个人发送频率超过限制：允许长期 ${policy.floodRatePerMinute} 条/分钟、短时连续 ${policy.floodBurstAllowance} 条，虚拟积压 ${debtSeconds} 秒，超出容忍 ${waitSeconds} 秒，是否新增违规：${penaltyNode}`,
+      'delete',
     )
-    item.sustained = sustained
-    if (sustained.confirmed) {
-      const penaltyIntervalExpired = now - sustained.lastTriggeredAt >= policy.burstCooldownMs
-      const signal = createSignal(
-        'spam_sustained',
-        'behavior',
-        '长期发送速率异常',
-        `令牌桶持续耗尽超过 ${Math.round(policy.sustainedConfirmMs / 1000)} 秒，长期速率 ${policy.sustainedRefillPerMinute} 条/分钟`,
-        'delete',
-        '长期速率超限',
-      )
-      signal.countsAsOffense = penaltyIntervalExpired
-      signal.writeAudit = penaltyIntervalExpired
-      if (penaltyIntervalExpired) item.sustained.lastTriggeredAt = now
-      signals.push(signal)
-      const log = `长期速率检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，处罚节点 ${penaltyIntervalExpired ? '是' : '否'}`
-      if (penaltyIntervalExpired) logger.info(`触发${log}`)
-      else logger.debug(`持续${log}`)
-    }
-  } else {
-    item.sustained = createSustainedRateActivity(policy.sustainedBucketCapacity, now)
+    signal.countsAsOffense = flood.triggered
+    signal.writeAudit = flood.triggered
+    signals.push(signal)
+    const log = `单人刷屏检测：群 ${session.guildId || ''}，用户 ${session.userId || ''}，虚拟积压 ${debtSeconds} 秒，超出容忍 ${waitSeconds} 秒，处罚节点 ${penaltyNode}`
+    if (flood.triggered) logger.info(`触发${log}`)
+    else logger.debug(`持续${log}`)
   }
 
   activity.delete(key)
@@ -2087,8 +2019,7 @@ function getSignalRank(code: SignalCode) {
   if (code === 'redline_keyword') return 8
   if (code === 'ai_review') return 7
   if (code === 'spam_model') return 7
-  if (code === 'spam_burst') return 6
-  if (code === 'spam_sustained') return 5
+  if (code === 'spam_flood') return 6
   return 1
 }
 

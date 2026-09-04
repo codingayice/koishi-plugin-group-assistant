@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildAiReviewRequest, parseAiReviewResult } from '../src/ai-review'
-import { createBurstActivity, updateBurstActivity } from '../src/spam-detection'
-import { createSustainedRateActivity, updateSustainedRateActivity } from '../src/sustained-rate'
+import { detectBehaviorSignals } from '../src/content-moderation'
+import { createGcraActivity, updateGcraActivity } from '../src/flood-detection'
 import { parseWordlist } from '../src/wordlist-import'
 import { getTemplateViolationType } from '../src/moderation-template'
 
@@ -56,87 +56,151 @@ test('词库解析会过滤注释并按生产归一化规则去重', () => {
   assert.equal(parsed.invalidCount, 1)
 })
 
-test('刷屏同一轮只产生一次处罚触发', () => {
-  let activity = createBurstActivity()
-  activity = updateBurstActivity(activity, 0, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 1_000, 10_000, 3, 60_000, 15_000)
-  const result = updateBurstActivity(activity, 2_000, 10_000, 3, 60_000, 15_000)
+test('GCRA 允许配置数量的瞬时消息并拦截下一条', () => {
+  let activity = createGcraActivity()
+  for (let index = 0; index < 4; index++) {
+    activity = updateGcraActivity(activity, 0, 12, 4, 60_000)
+    assert.equal(activity.exceeded, false)
+  }
 
-  assert.equal(result.thresholdReached, true)
+  const result = updateGcraActivity(activity, 0, 12, 4, 60_000)
+  assert.equal(result.exceeded, true)
   assert.equal(result.triggered, true)
+  assert.equal(result.retryAfterMs, 5_000)
 
-  const continued = updateBurstActivity(result, 3_000, 10_000, 3, 60_000, 15_000)
-  assert.equal(continued.thresholdReached, true)
+  const continued = updateGcraActivity(result, 1_000, 12, 4, 60_000)
+  assert.equal(continued.exceeded, true)
   assert.equal(continued.triggered, false)
-  assert.equal(continued.state, 'active')
+  assert.equal(continued.theoreticalArrivalTime, result.theoreticalArrivalTime)
 })
 
-test('冷却期间再次刷屏只拦截，不重复处罚', () => {
-  let activity = createBurstActivity()
-  activity = updateBurstActivity(activity, 0, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 1_000, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 2_000, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 20_000, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 21_000, 10_000, 3, 60_000, 15_000)
-  const result = updateBurstActivity(activity, 22_000, 10_000, 3, 60_000, 15_000)
+test('GCRA 能累计略高于长期限制的慢速刷屏', () => {
+  let activity = createGcraActivity()
+  let firstExceededAt = -1
+  for (let now = 0; now <= 80_000; now += 4_000) {
+    activity = updateGcraActivity(activity, now, 12, 4, 60_000)
+    if (activity.exceeded && firstExceededAt < 0) firstExceededAt = now
+  }
 
-  assert.equal(result.thresholdReached, true)
-  assert.equal(result.triggered, false)
-  assert.equal(result.state, 'active')
+  assert.equal(firstExceededAt, 64_000)
 })
 
-test('恢复并结束冷却后可以开启新一轮处罚', () => {
-  let activity = createBurstActivity()
-  activity = updateBurstActivity(activity, 0, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 1_000, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 2_000, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 20_000, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 63_000, 10_000, 3, 60_000, 15_000)
-  activity = updateBurstActivity(activity, 64_000, 10_000, 3, 60_000, 15_000)
-  const result = updateBurstActivity(activity, 65_000, 10_000, 3, 60_000, 15_000)
-
-  assert.equal(result.thresholdReached, true)
-  assert.equal(result.triggered, true)
-  assert.equal(result.state, 'active')
+test('GCRA 允许不超过长期限制的稳定发送', () => {
+  let activity = createGcraActivity()
+  for (let index = 0; index < 100; index++) {
+    activity = updateGcraActivity(activity, index * 5_000, 12, 4, 60_000)
+    assert.equal(activity.exceeded, false)
+  }
 })
 
-test('持续高频发送会在冷却结束后再次累计违规', () => {
-  let activity = createBurstActivity()
+test('GCRA 恢复后重新获得完整突发额度', () => {
+  let activity = createGcraActivity()
+  for (let index = 0; index < 4; index++) {
+    activity = updateGcraActivity(activity, 0, 12, 4, 60_000)
+  }
+  activity = updateGcraActivity(activity, 0, 12, 4, 60_000)
+  assert.equal(activity.exceeded, true)
+
+  activity = updateGcraActivity(activity, 60_000, 12, 4, 60_000)
+  assert.equal(activity.exceeded, false)
+  assert.equal(activity.episodeActive, false)
+
+  for (let index = 0; index < 3; index++) {
+    activity = updateGcraActivity(activity, 60_000, 12, 4, 60_000)
+    assert.equal(activity.exceeded, false)
+  }
+  const next = updateGcraActivity(activity, 60_000, 12, 4, 60_000)
+  assert.equal(next.exceeded, true)
+  assert.equal(next.triggered, true)
+})
+
+test('GCRA 处罚冷却期间继续拦截但不重复累计', () => {
+  let activity = createGcraActivity()
   let triggeredCount = 0
-  for (let index = 0; index < 70; index++) {
-    activity = updateBurstActivity(activity, index * 2_000, 10_000, 3, 60_000, 15_000)
+  let exceededCount = 0
+  for (let now = 0; now <= 130_000; now += 1_000) {
+    activity = updateGcraActivity(activity, now, 12, 4, 60_000)
+    if (activity.exceeded) exceededCount++
     if (activity.triggered) triggeredCount++
   }
 
+  assert.ok(exceededCount > triggeredCount)
   assert.equal(triggeredCount, 3)
-  assert.equal(activity.state, 'active')
 })
 
-test('长期令牌桶允许初始突发并确认持续超速', () => {
-  let activity = createSustainedRateActivity(3, 0)
-  activity = updateSustainedRateActivity(activity, 0, 3, 6, 5_000)
-  activity = updateSustainedRateActivity(activity, 1_000, 3, 6, 5_000)
-  activity = updateSustainedRateActivity(activity, 2_000, 3, 6, 5_000)
-  activity = updateSustainedRateActivity(activity, 3_000, 3, 6, 5_000)
+test('生产行为链路按群和用户隔离 GCRA 状态', () => {
+  const activity = new Map()
+  const policy = {
+    floodRatePerMinute: 15,
+    floodBurstAllowance: 8,
+    floodCooldownMs: 60_000,
+    offenseWindowMs: 86_400_000,
+    punishmentLevels: [],
+  }
+  const session = (guildId: string, userId: string) => ({ guildId, userId }) as any
 
-  assert.equal(activity.overLimit, true)
-  assert.equal(activity.confirmed, false)
+  for (let index = 0; index < 8; index++) {
+    assert.equal(detectBehaviorSignals(session('guild-1', 'user-1'), activity, policy, 0).length, 0)
+  }
 
-  const confirmed = updateSustainedRateActivity(activity, 8_000, 3, 6, 5_000)
-  assert.equal(confirmed.overLimit, true)
-  assert.equal(confirmed.confirmed, true)
+  const [signal] = detectBehaviorSignals(session('guild-1', 'user-1'), activity, policy, 0)
+  assert.equal(signal.code, 'spam_flood')
+  assert.equal(signal.action, 'delete')
+  assert.equal(signal.countsAsOffense, true)
+  assert.equal(signal.writeAudit, true)
+  assert.match(signal.evidence, /允许长期 15 条\/分钟/)
+  assert.match(signal.evidence, /短时连续 8 条/)
+  assert.match(signal.evidence, /虚拟积压 32\.0 秒/)
+  assert.match(signal.evidence, /超出容忍 4\.0 秒/)
+  assert.match(signal.evidence, /是否新增违规：是/)
+
+  const [continued] = detectBehaviorSignals(session('guild-1', 'user-1'), activity, policy, 0)
+  assert.equal(continued.countsAsOffense, false)
+  assert.equal(continued.writeAudit, false)
+  assert.match(continued.evidence, /是否新增违规：否/)
+
+  assert.equal(detectBehaviorSignals(session('guild-1', 'user-2'), activity, policy, 0).length, 0)
+  assert.equal(detectBehaviorSignals(session('guild-2', 'user-1'), activity, policy, 0).length, 0)
 })
 
-test('长期速率停止后令牌恢复并结束超速状态', () => {
-  let activity = createSustainedRateActivity(3, 0)
-  activity = updateSustainedRateActivity(activity, 0, 3, 6, 5_000)
-  activity = updateSustainedRateActivity(activity, 1_000, 3, 6, 5_000)
-  activity = updateSustainedRateActivity(activity, 2_000, 3, 6, 5_000)
-  activity = updateSustainedRateActivity(activity, 3_000, 3, 6, 5_000)
-  activity = updateSustainedRateActivity(activity, 8_000, 3, 6, 5_000)
+test('生产行为链路在策略变化后重置旧 GCRA 状态', () => {
+  const activity = new Map()
+  const session = { guildId: 'guild-1', userId: 'user-1' } as any
+  const strictPolicy = {
+    floodRatePerMinute: 12,
+    floodBurstAllowance: 2,
+    floodCooldownMs: 45_000,
+    offenseWindowMs: 86_400_000,
+    punishmentLevels: [],
+  }
 
-  const recovered = updateSustainedRateActivity(activity, 60_000, 3, 6, 5_000)
-  assert.equal(recovered.overLimit, false)
-  assert.equal(recovered.confirmed, false)
-  assert.equal(recovered.overLimitSince, 0)
+  detectBehaviorSignals(session, activity, strictPolicy, 0)
+  detectBehaviorSignals(session, activity, strictPolicy, 0)
+  assert.equal(detectBehaviorSignals(session, activity, strictPolicy, 0).length, 1)
+
+  const changedPolicy = { ...strictPolicy, floodBurstAllowance: 3 }
+  assert.equal(detectBehaviorSignals(session, activity, changedPolicy, 0).length, 0)
+})
+
+test('生产行为链路在处罚冷却结束后重新累计违规', () => {
+  const activity = new Map()
+  const session = { guildId: 'guild-1', userId: 'user-1' } as any
+  const policy = {
+    floodRatePerMinute: 60,
+    floodBurstAllowance: 1,
+    floodCooldownMs: 10_000,
+    offenseWindowMs: 86_400_000,
+    punishmentLevels: [],
+  }
+
+  detectBehaviorSignals(session, activity, policy, 0)
+  const [first] = detectBehaviorSignals(session, activity, policy, 0)
+  const [continued] = detectBehaviorSignals(session, activity, policy, 0)
+  assert.equal(first.countsAsOffense, true)
+  assert.equal(continued.countsAsOffense, false)
+
+  detectBehaviorSignals(session, activity, policy, 10_000)
+  const [nextEpisode] = detectBehaviorSignals(session, activity, policy, 10_000)
+  assert.equal(nextEpisode.countsAsOffense, true)
+  assert.equal(nextEpisode.writeAudit, true)
 })

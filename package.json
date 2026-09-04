@@ -1,13 +1,13 @@
 {
   "name": "koishi-plugin-group-assistant",
   "description": "群聊治理插件，覆盖入群退群通知、入群审核、刷屏检测、基于关键词与模型的违规内容检测、违规自动处罚，保留审计日志",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "scripts": {
     "build": "node -e \"const fs=require('fs');fs.rmSync('lib',{recursive:true,force:true});fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('tsconfig.tsbuildinfo',{force:true})\" && tsc --pretty false && esbuild src/index.ts --bundle --platform=node --format=cjs --external:koishi --outfile=lib/index.js && node -e \"require('@koishijs/client/lib').build(process.cwd()).catch(err=>{console.error(err);process.exitCode=1})\"",
     "typecheck": "tsc --pretty false",
-    "test": "esbuild tests/governance.test.ts --bundle --platform=node --format=cjs --outfile=.test/governance.test.cjs && node --test .test/governance.test.cjs && node -e \"require('fs').rmSync('.test',{recursive:true,force:true})\""
+    "test": "esbuild tests/governance.test.ts --bundle --platform=node --format=cjs --external:koishi --outfile=.test/governance.test.cjs && node --test .test/governance.test.cjs && node -e \"require('fs').rmSync('.test',{recursive:true,force:true})\""
   },
   "files": [
     "lib",
@@ -15,6 +15,10 @@
     "client",
     "CHANGELOG.md"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -107,48 +107,22 @@ const contentDetectionSchema = {
 const behaviorDetectionSchema = {
   behaviorDetectionEnabled: Schema.boolean()
     .default(true)
-    .description('启用行为检测'),
-  burstDetectionEnabled: Schema.boolean()
-    .default(true)
-    .description('启用瞬时刷屏检测'),
-  burstWindowSeconds: Schema.number()
-    .default(10)
-    .min(5)
-    .max(60)
-    .description('自定义模式下，瞬时刷屏统计窗口，单位秒'),
-  burstMessageCount: Schema.number()
-    .default(6)
-    .min(3)
-    .max(20)
-    .description('自定义模式下，窗口内达到该消息数时判定刷屏'),
-  burstCooldownSeconds: Schema.number()
+    .description('启用单人刷屏检测'),
+  floodRatePerMinute: Schema.number()
+    .default(15)
+    .min(1)
+    .max(240)
+    .description('自定义模式下，单个用户允许长期保持的发送速度，单位条/分钟'),
+  floodBurstAllowance: Schema.number()
+    .default(8)
+    .min(1)
+    .max(50)
+    .description('自定义模式下，单个用户允许短时间连续发送的消息数'),
+  floodCooldownSeconds: Schema.number()
     .default(60)
     .min(10)
     .max(3600)
     .description('自定义模式下，同一轮刷屏重复拦截的处罚冷却时间，单位秒'),
-  burstRecoverySeconds: Schema.number()
-    .default(15)
-    .min(5)
-    .max(300)
-    .description('自定义模式下，连续多久未再次达到刷屏阈值后恢复正常，单位秒'),
-  sustainedRateDetectionEnabled: Schema.boolean()
-    .default(true)
-    .description('启用长期发送速率检测'),
-  sustainedBucketCapacity: Schema.number()
-    .default(30)
-    .min(10)
-    .max(200)
-    .description('自定义模式下，长期速率令牌桶容量，每条消息消耗一个令牌'),
-  sustainedRefillPerMinute: Schema.number()
-    .default(18)
-    .min(1)
-    .max(240)
-    .description('自定义模式下，长期速率令牌补充速度，单位条/分钟'),
-  sustainedConfirmSeconds: Schema.number()
-    .default(20)
-    .min(5)
-    .max(300)
-    .description('自定义模式下，令牌耗尽后持续超速多久才确认刷屏，单位秒'),
 }
 
 const deepseekSchema = {
@@ -185,15 +159,9 @@ export interface Config {
   }
   behavior: {
     behaviorDetectionEnabled?: boolean
-    burstDetectionEnabled?: boolean
-    burstWindowSeconds?: number
-    burstMessageCount?: number
-    burstCooldownSeconds?: number
-    burstRecoverySeconds?: number
-    sustainedRateDetectionEnabled?: boolean
-    sustainedBucketCapacity?: number
-    sustainedRefillPerMinute?: number
-    sustainedConfirmSeconds?: number
+    floodRatePerMinute?: number
+    floodBurstAllowance?: number
+    floodCooldownSeconds?: number
   }
   deepseek: {
     aiReviewEnabled?: boolean
